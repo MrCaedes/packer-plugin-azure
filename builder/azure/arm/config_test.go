@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/go-azure-sdk/resource-manager/compute/2022-03-01/virtualmachines"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/network/2023-09-01/publicipaddresses"
 	"github.com/hashicorp/packer-plugin-azure/builder/azure/common/constants"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	sdkconfig "github.com/hashicorp/packer-plugin-sdk/template/config"
 )
 
@@ -61,6 +62,10 @@ func TestConfigShouldProvideReasonableDefaultValues(t *testing.T) {
 	if c.BuildKeyVaultEnableRBACAuthorization {
 		t.Error("Expected 'BuildKeyVaultEnableRBACAuthorization' to default to false!")
 	}
+
+	if c.BuildKeyVaultDeleteSecret {
+		t.Error("Expected 'BuildKeyVaultDeleteSecret' to default to false!")
+	}
 }
 
 func TestConfigShouldEnableBuildKeyVaultRBACAuthorization(t *testing.T) {
@@ -82,6 +87,160 @@ func TestConfigSpecIncludesBuildKeyVaultRBACAuthorization(t *testing.T) {
 	_, ok := (&Config{}).FlatMapstructure().HCL2Spec()["build_key_vault_enable_rbac_authorization"]
 	if !ok {
 		t.Error("Expected HCL2 spec to include 'build_key_vault_enable_rbac_authorization'!")
+	}
+}
+
+func TestConfigShouldEnableBuildKeyVaultSecretDeletion(t *testing.T) {
+	builderValues := getArmBuilderConfigurationWithWindows()
+	delete(builderValues, "location")
+	builderValues["build_key_vault_name"] = "test-key-vault"
+	builderValues["build_resource_group_name"] = "test-key-vault-rg"
+	builderValues["build_key_vault_delete_secret"] = "true"
+
+	var c Config
+	_, err := c.Prepare(builderValues, getPackerConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.BuildKeyVaultDeleteSecret {
+		t.Error("Expected 'BuildKeyVaultDeleteSecret' to be true!")
+	}
+	if !strings.HasPrefix(c.tmpKeyVaultSecretName, DefaultSecretName+"-") {
+		t.Fatalf("Expected a run-scoped secret name with prefix %q, got %q", DefaultSecretName+"-", c.tmpKeyVaultSecretName)
+	}
+	if len(c.tmpKeyVaultSecretName) != len(DefaultSecretName)+1+keyVaultSecretNameSuffixLength {
+		t.Fatalf("Expected a %d-character run-scoped secret name, got %q", len(DefaultSecretName)+1+keyVaultSecretNameSuffixLength, c.tmpKeyVaultSecretName)
+	}
+}
+
+func TestConfigRejectsInvalidBuildKeyVaultSecretDeletion(t *testing.T) {
+	testCases := []struct {
+		name      string
+		configure func(map[string]string)
+		expected  string
+	}{
+		{
+			name: "missing build key vault",
+			configure: func(values map[string]string) {
+				values["build_key_vault_delete_secret"] = "true"
+			},
+			expected: "build_key_vault_delete_secret requires build_key_vault_name",
+		},
+		{
+			name: "skipping build key vault",
+			configure: func(values map[string]string) {
+				delete(values, "location")
+				values["build_key_vault_name"] = "test-key-vault"
+				values["build_resource_group_name"] = "test-key-vault-rg"
+				values["build_key_vault_delete_secret"] = "true"
+				values["skip_create_build_key_vault"] = "true"
+			},
+			expected: "build_key_vault_delete_secret cannot be used with skip_create_build_key_vault",
+		},
+		{
+			name: "missing build key vault resource group",
+			configure: func(values map[string]string) {
+				values["build_key_vault_name"] = "test-key-vault"
+				values["build_key_vault_delete_secret"] = "true"
+			},
+			expected: "build_key_vault_delete_secret requires build_resource_group_name for the Key Vault resource group",
+		},
+		{
+			name: "secret name prefix is too long",
+			configure: func(values map[string]string) {
+				delete(values, "location")
+				values["build_key_vault_name"] = "test-key-vault"
+				values["build_resource_group_name"] = "test-key-vault-rg"
+				values["build_key_vault_secret_name"] = strings.Repeat("a", keyVaultSecretNamePrefixMaxLength+1)
+				values["build_key_vault_delete_secret"] = "true"
+			},
+			expected: "build_key_vault_secret_name must contain only alphanumeric characters or hyphens",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			builderValues := getArmBuilderConfigurationWithWindows()
+			testCase.configure(builderValues)
+
+			var c Config
+			_, err := c.Prepare(builderValues, getPackerConfiguration())
+			if err == nil || !strings.Contains(err.Error(), testCase.expected) {
+				t.Fatalf("Expected error containing %q, got %v", testCase.expected, err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsBuildKeyVaultSecretDeletionForLinux(t *testing.T) {
+	builderValues := getArmBuilderConfiguration()
+	delete(builderValues, "location")
+	builderValues["build_key_vault_name"] = "test-key-vault"
+	builderValues["build_resource_group_name"] = "test-key-vault-rg"
+	builderValues["build_key_vault_delete_secret"] = true
+
+	var c Config
+	_, err := c.Prepare(builderValues, getPackerConfiguration())
+	if err == nil || !strings.Contains(err.Error(), "build_key_vault_delete_secret is only supported for Windows builds") {
+		t.Fatalf("Expected Windows-only validation error, got %v", err)
+	}
+}
+
+func TestConfigSpecIncludesBuildKeyVaultSecretDeletion(t *testing.T) {
+	_, ok := (&Config{}).FlatMapstructure().HCL2Spec()["build_key_vault_delete_secret"]
+	if !ok {
+		t.Error("Expected HCL2 spec to include 'build_key_vault_delete_secret'!")
+	}
+}
+
+func TestBuilderConfigureStateBagUsesRunScopedKeyVaultSecretName(t *testing.T) {
+	builderValues := getArmBuilderConfigurationWithWindows()
+	delete(builderValues, "location")
+	builderValues["build_key_vault_name"] = "test-key-vault"
+	builderValues["build_resource_group_name"] = "test-key-vault-rg"
+	builderValues["build_key_vault_secret_name"] = "packer-winrm"
+	builderValues["build_key_vault_delete_secret"] = "true"
+
+	var c Config
+	if _, err := c.Prepare(builderValues, getPackerConfiguration()); err != nil {
+		t.Fatal(err)
+	}
+
+	builder := &Builder{config: c}
+	state := new(multistep.BasicStateBag)
+	builder.configureStateBag(state)
+
+	actualSecretName := state.Get(constants.ArmKeyVaultSecretName).(string)
+	if actualSecretName != c.tmpKeyVaultSecretName {
+		t.Fatalf("Expected state to use %q, got %q", c.tmpKeyVaultSecretName, actualSecretName)
+	}
+	if c.BuildKeyVaultSecretName != "packer-winrm" {
+		t.Fatalf("Expected configured secret name to remain the prefix, got %q", c.BuildKeyVaultSecretName)
+	}
+}
+
+func TestConfigGeneratesDistinctKeyVaultSecretNamesForCleanup(t *testing.T) {
+	prepare := func(t *testing.T) Config {
+		t.Helper()
+		builderValues := getArmBuilderConfigurationWithWindows()
+		delete(builderValues, "location")
+		builderValues["build_key_vault_name"] = "test-key-vault"
+		builderValues["build_resource_group_name"] = "test-key-vault-rg"
+		builderValues["build_key_vault_secret_name"] = "packer-winrm"
+		builderValues["build_key_vault_delete_secret"] = "true"
+
+		var c Config
+		if _, err := c.Prepare(builderValues, getPackerConfiguration()); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	first := prepare(t)
+	second := prepare(t)
+	if first.tmpKeyVaultSecretName == second.tmpKeyVaultSecretName {
+		t.Fatalf("Expected distinct run-scoped secret names, got %q", first.tmpKeyVaultSecretName)
 	}
 }
 

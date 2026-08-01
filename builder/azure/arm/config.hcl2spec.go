@@ -71,6 +71,7 @@ type FlatConfig struct {
 	BuildResourceGroupName                     *string                            `mapstructure:"build_resource_group_name" cty:"build_resource_group_name" hcl:"build_resource_group_name"`
 	BuildKeyVaultName                          *string                            `mapstructure:"build_key_vault_name" cty:"build_key_vault_name" hcl:"build_key_vault_name"`
 	BuildKeyVaultSecretName                    *string                            `mapstructure:"build_key_vault_secret_name" cty:"build_key_vault_secret_name" hcl:"build_key_vault_secret_name"`
+	BuildKeyVaultDeleteSecret                  *bool                              `mapstructure:"build_key_vault_delete_secret" required:"false" cty:"build_key_vault_delete_secret" hcl:"build_key_vault_delete_secret"`
 	BuildKeyVaultSKU                           *string                            `mapstructure:"build_key_vault_sku" cty:"build_key_vault_sku" hcl:"build_key_vault_sku"`
 	BuildKeyVaultEnableRBACAuthorization       *bool                              `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false" cty:"build_key_vault_enable_rbac_authorization" hcl:"build_key_vault_enable_rbac_authorization"`
 	SkipCreateBuildKeyVault                    *bool                              `mapstructure:"skip_create_build_key_vault" required:"false" cty:"skip_create_build_key_vault" hcl:"skip_create_build_key_vault"`
@@ -229,6 +230,7 @@ func (*FlatConfig) HCL2Spec() map[string]hcldec.Spec {
 		"build_resource_group_name":                 &hcldec.AttrSpec{Name: "build_resource_group_name", Type: cty.String, Required: false},
 		"build_key_vault_name":                      &hcldec.AttrSpec{Name: "build_key_vault_name", Type: cty.String, Required: false},
 		"build_key_vault_secret_name":               &hcldec.AttrSpec{Name: "build_key_vault_secret_name", Type: cty.String, Required: false},
+		"build_key_vault_delete_secret":             &hcldec.AttrSpec{Name: "build_key_vault_delete_secret", Type: cty.Bool, Required: false},
 		"build_key_vault_sku":                       &hcldec.AttrSpec{Name: "build_key_vault_sku", Type: cty.String, Required: false},
 		"build_key_vault_enable_rbac_authorization": &hcldec.AttrSpec{Name: "build_key_vault_enable_rbac_authorization", Type: cty.Bool, Required: false},
 		"skip_create_build_key_vault":               &hcldec.AttrSpec{Name: "skip_create_build_key_vault", Type: cty.Bool, Required: false},
