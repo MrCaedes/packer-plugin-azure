@@ -120,6 +120,7 @@ type Properties struct {
 	DNSSettings                  *hashiPublicIPSDK.PublicIPAddressDnsSettings  `json:"dnsSettings,omitempty"`
 	EnabledForDeployment         *string                                       `json:"enabledForDeployment,omitempty"`
 	EnabledForTemplateDeployment *string                                       `json:"enabledForTemplateDeployment,omitempty"`
+	EnableRbacAuthorization      *bool                                         `json:"enableRbacAuthorization,omitempty"`
 	EnableSoftDelete             *string                                       `json:"enableSoftDelete,omitempty"`
 	HardwareProfile              *hashiVMSDK.HardwareProfile                   `json:"hardwareProfile,omitempty"`
 	IPConfigurations             *[]hashiPublicIPSDK.IPConfiguration           `json:"ipConfigurations,omitempty"`

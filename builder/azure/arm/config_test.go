@@ -57,6 +57,32 @@ func TestConfigShouldProvideReasonableDefaultValues(t *testing.T) {
 	if c.diskCachingType == "" {
 		t.Errorf("Expected 'diskCachingType' to be populated, but it was empty!")
 	}
+
+	if c.BuildKeyVaultEnableRBACAuthorization {
+		t.Error("Expected 'BuildKeyVaultEnableRBACAuthorization' to default to false!")
+	}
+}
+
+func TestConfigShouldEnableBuildKeyVaultRBACAuthorization(t *testing.T) {
+	builderValues := getArmBuilderConfiguration()
+	builderValues["build_key_vault_enable_rbac_authorization"] = true
+
+	var c Config
+	_, err := c.Prepare(builderValues, getPackerConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.BuildKeyVaultEnableRBACAuthorization {
+		t.Error("Expected 'BuildKeyVaultEnableRBACAuthorization' to be true!")
+	}
+}
+
+func TestConfigSpecIncludesBuildKeyVaultRBACAuthorization(t *testing.T) {
+	_, ok := (&Config{}).FlatMapstructure().HCL2Spec()["build_key_vault_enable_rbac_authorization"]
+	if !ok {
+		t.Error("Expected HCL2 spec to include 'build_key_vault_enable_rbac_authorization'!")
+	}
 }
 
 func TestConfigUserNameOverride(t *testing.T) {

@@ -430,6 +430,10 @@ type Config struct {
 	// Specify the KeyVault SKU to create during the build. Valid values are
 	// standard or premium. The default value is standard.
 	BuildKeyVaultSKU string `mapstructure:"build_key_vault_sku"`
+	// Enable Azure RBAC authorization for the temporary build Key Vault instead
+	// of creating Key Vault access policies. This applies only when Packer
+	// creates the build Key Vault and defaults to false.
+	BuildKeyVaultEnableRBACAuthorization bool `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false"`
 
 	// Skip creating the build key vault during Windows build.
 	// This is useful for cases when a subscription has policy restrictions on key vault resources.

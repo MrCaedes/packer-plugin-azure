@@ -149,6 +149,20 @@ func (s *TemplateBuilder) SetSecretExpiry(exp int64) error {
 	return nil
 }
 
+// EnableKeyVaultRBACAuthorization configures Azure RBAC authorization for a Key Vault template.
+func (s *TemplateBuilder) EnableKeyVaultRBACAuthorization() error {
+	resource, err := s.getResourceByType(resourceKeyVaults)
+	if err != nil {
+		return err
+	}
+
+	resource.Properties.AccessPolicies = nil
+	resource.Properties.EnableRbacAuthorization = common.BoolPtr(true)
+
+	delete(*s.template.Parameters, "objectId")
+	return nil
+}
+
 func (s *TemplateBuilder) SetIdentity(userAssignedManagedIdentities []string) error {
 	resource, err := s.getResourceByType(resourceVirtualMachine)
 	if err != nil {

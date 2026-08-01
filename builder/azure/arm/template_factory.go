@@ -56,12 +56,20 @@ func GetKeyVaultDeployment(ctx context.Context, config *Config, secretValue stri
 		KeyVaultSKU:         &template.TemplateParameter{Value: config.BuildKeyVaultSKU},
 		KeyVaultSecretName:  &template.TemplateParameter{Value: config.BuildKeyVaultSecretName},
 		KeyVaultSecretValue: &template.TemplateParameter{Value: secretValue},
-		ObjectId:            &template.TemplateParameter{Value: config.ClientConfig.ObjectID},
 		TenantId:            &template.TemplateParameter{Value: config.ClientConfig.TenantID},
+	}
+	if !config.BuildKeyVaultEnableRBACAuthorization {
+		params.ObjectId = &template.TemplateParameter{Value: config.ClientConfig.ObjectID}
 	}
 
 	builder, _ := template.NewTemplateBuilder(template.KeyVault)
 	_ = builder.SetTags(&config.AzureTags)
+	if config.BuildKeyVaultEnableRBACAuthorization {
+		err := builder.EnableKeyVaultRBACAuthorization()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	if exp != nil {
 		err := builder.SetSecretExpiry(*exp)

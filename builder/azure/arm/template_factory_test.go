@@ -1285,6 +1285,67 @@ func TestKeyVaultDeployment02(t *testing.T) {
 	}
 }
 
+func TestKeyVaultDeploymentWithRBACAuthorization(t *testing.T) {
+	config := getArmBuilderConfigurationWithWindows()
+	config["build_key_vault_enable_rbac_authorization"] = "true"
+
+	var c Config
+	_, err := c.Prepare(config, getPackerConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deployment, err := GetKeyVaultDeployment(context.Background(), &c, c.winrmCertificate, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := (*deployment.Properties.Parameters)["objectId"]; ok {
+		t.Error("Expected RBAC Key Vault deployment parameters to omit 'objectId'!")
+	}
+
+	templateJSON, err := json.Marshal(deployment.Properties.Template)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var document struct {
+		Parameters map[string]json.RawMessage `json:"parameters"`
+		Resources  []struct {
+			Type       string                     `json:"type"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(templateJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := document.Parameters["objectId"]; ok {
+		t.Error("Expected RBAC Key Vault template to omit the unused 'objectId' parameter!")
+	}
+
+	for _, resource := range document.Resources {
+		if resource.Type != "Microsoft.KeyVault/vaults" {
+			continue
+		}
+
+		if _, ok := resource.Properties["accessPolicies"]; ok {
+			t.Error("Expected RBAC Key Vault template to omit access policies!")
+		}
+
+		var enabled bool
+		if err := json.Unmarshal(resource.Properties["enableRbacAuthorization"], &enabled); err != nil {
+			t.Fatalf("Expected RBAC Key Vault template to include enableRbacAuthorization: %v", err)
+		}
+		if !enabled {
+			t.Error("Expected RBAC Key Vault template to enable RBAC authorization!")
+		}
+		return
+	}
+
+	t.Error("Expected Key Vault resource in RBAC deployment template!")
+}
+
 // Ensure no licenseType is set when not specified in config
 func TestVirtualMachineDeploymentLicenseType01(t *testing.T) {
 	var c Config
