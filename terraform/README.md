@@ -33,6 +33,8 @@ Current outputs:
 - `resource_suffix`
 - `virtual_network_name`
 - `virtual_network_subnet_name`
+- `key_vault_name`
+- `rbac_key_vault_name`
 
 You can inspect them with:
 ```
@@ -45,3 +47,20 @@ terraform output -raw virtual_network_name
 ```
 
 These outputs only cover resources created by this Terraform program. For example, `ARM_TEMP_RESOURCE_GROUP_NAME` is still configured outside Terraform and is therefore not exposed as an output.
+
+## RBAC Key Vault acceptance fixture
+
+`rbac_key_vault_name` is a separate RBAC-enabled Key Vault in the acceptance
+resource group. It intentionally has no direct Key Vault data-plane assignment
+for the Packer identity so the ARM acceptance test can prove that Packer creates
+a vault-scoped `Key Vault Secrets Officer` assignment itself.
+
+The Packer acceptance identity needs `Microsoft.Authorization/roleAssignments/write`
+at that vault scope or above. The acceptance-test runner needs
+`Microsoft.Authorization/roleAssignments/delete` there to remove the test role
+afterwards; CI uses the same service principal for both. `Contributor` alone is
+insufficient. The Packer identity also needs
+`Microsoft.KeyVault/vaults/read`, `Microsoft.KeyVault/vaults/secrets/write`,
+and the usual permissions to create and delete the build resources. The test
+checks that no direct assignment exists before the build, verifies Packer's
+deterministic assignment afterwards, then removes only that assignment.

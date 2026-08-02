@@ -21,6 +21,10 @@ locals {
   key_vault_base_max = 24 - length(local.key_vault_suffix) - 2
   key_vault_base     = substr(lower(replace(replace(var.resource_prefix, "-", ""), "_", "")), 0, local.key_vault_base_max)
   key_vault_name     = "${local.key_vault_base}kv${local.key_vault_suffix}"
+
+  rbac_key_vault_base_max = 24 - length(local.key_vault_suffix) - 4
+  rbac_key_vault_base     = substr(lower(replace(replace(var.resource_prefix, "-", ""), "_", "")), 0, local.rbac_key_vault_base_max)
+  rbac_key_vault_name     = "${local.rbac_key_vault_base}rbkv${local.key_vault_suffix}"
 }
 
 resource "azurerm_resource_group" "rg" {
@@ -38,8 +42,8 @@ resource "azurerm_storage_account" "storage-account" {
 }
 
 resource "azurerm_storage_container" "example" {
-  name                  = "packeracc"
-  storage_account_id    = azurerm_storage_account.storage-account.id
+  name               = "packeracc"
+  storage_account_id = azurerm_storage_account.storage-account.id
 }
 
 resource "azurerm_shared_image_gallery" "gallery" {
@@ -96,6 +100,21 @@ resource "azurerm_key_vault" "vault" {
 
     secret_permissions = ["Get", "Set", "Delete", "Purge"]
   }
+}
+
+# Keep this separate from the access-policy fixture above: the ARM acceptance
+# test must prove that Packer grants its own role on an existing RBAC vault.
+resource "azurerm_key_vault" "rbac_fixture" {
+  name                       = local.rbac_key_vault_name
+  location                   = azurerm_resource_group.rg.location
+  resource_group_name        = azurerm_resource_group.rg.name
+  enabled_for_deployment     = true
+  rbac_authorization_enabled = true
+  tenant_id                  = var.tenant_id
+  soft_delete_retention_days = 7
+  purge_protection_enabled   = false
+
+  sku_name = "standard"
 }
 
 resource "azurerm_virtual_network" "vnet" {

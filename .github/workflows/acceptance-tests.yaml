@@ -101,11 +101,6 @@ jobs:
           echo "ARM_TEMP_RESOURCE_GROUP_NAME=${BASE_PREFIX}-${SUFFIX}-acceptance-test-managed-cli" >> $GITHUB_ENV
           echo "ARM_TENANT_ID=${{ secrets.ARM_TENANT_ID }}" >> $GITHUB_ENV
 
-          KV_BASE=$(echo "${BASE_PREFIX}" | tr '[:upper:]' '[:lower:]' | tr -d '-' | tr -d '_')
-          KV_BASE_MAX=$((24 - ${#SUFFIX} - 2))
-          KV_BASE=${KV_BASE:0:${KV_BASE_MAX}}
-          echo "ARM_KEY_VAULT_NAME=${KV_BASE}kv${SUFFIX}" >> $GITHUB_ENV
-
           echo "ARM_VIRTUAL_NETWORK_NAME=${BASE_PREFIX}_${SUFFIX}_vnet" >> $GITHUB_ENV
 
           OBJECT_ID=$(az ad sp show --id "${{ secrets.ARM_CLIENT_ID }}" | jq -r '.id')
@@ -114,6 +109,12 @@ jobs:
       - name: Run `terraform apply` to create resources for acceptance tests
         working-directory: ./terraform
         run: ./run_terraform_apply_with_expected_env_vars.sh
+
+      - name: Export Key Vault fixture variables
+        working-directory: ./terraform
+        run: |
+          echo "ARM_KEY_VAULT_NAME=$(terraform output -raw key_vault_name)" >> $GITHUB_ENV
+          echo "ARM_RBAC_KEY_VAULT_NAME=$(terraform output -raw rbac_key_vault_name)" >> $GITHUB_ENV
 
       - name: Run Acceptance Tests
         run:  make testacc

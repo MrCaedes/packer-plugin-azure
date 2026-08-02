@@ -27,6 +27,9 @@ package arm
 // ** PACKER_ACC - set to any non 0 value
 // * Env Variables for Existing VNet tests
 // ** ARM_VIRTUAL_NETWORK_NAME - name of the pre-existing virtual network
+// * Env Variables for Existing RBAC Key Vault tests
+// ** ARM_RBAC_KEY_VAULT_NAME - name of the RBAC-enabled existing Key Vault in ARM_RESOURCE_GROUP_NAME
+// ** AZURE_OBJECT_ID - object ID of the Packer build identity
 //
 // It is recommended to run the tests with the options "-v -timeout 90m"
 // command, e.g.:
@@ -35,12 +38,14 @@ package arm
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/packer-plugin-azure/builder/azure/common"
 	"github.com/hashicorp/packer-plugin-sdk/acctest"
@@ -156,6 +161,125 @@ func TestBuilderAcc_ManagedDisk_Windows(t *testing.T) {
 			return nil
 		},
 	})
+}
+
+func TestBuilderAcc_ManagedDisk_Windows_TemporaryKeyVault_RBACDefaultRole(t *testing.T) {
+	t.Parallel()
+	common.CheckAcceptanceTestEnvVars(t, common.CheckAcceptanceTestEnvVarsParams{
+		CheckAzureCLI: true,
+	})
+
+	acctest.TestPlugin(t, &acctest.PluginTestCase{
+		Name:     "test-azure-managedisk-windows-temporary-key-vault-rbac-default-role",
+		Type:     "azure-arm",
+		Template: testBuilderAccManagedDiskWindowsTemporaryKeyVaultRBAC,
+		Check: func(buildCommand *exec.Cmd, logfile string) error {
+			if buildCommand.ProcessState != nil && buildCommand.ProcessState.ExitCode() != 0 {
+				return fmt.Errorf("Bad exit code. Logfile: %s", logfile)
+			}
+			return nil
+		},
+	})
+}
+
+func TestBuilderAcc_ManagedDisk_Windows_ExistingBuildKeyVault_RBACDefaultRole(t *testing.T) {
+	t.Parallel()
+	common.CheckAcceptanceTestEnvVars(t, common.CheckAcceptanceTestEnvVarsParams{
+		CheckAzureCLI: true,
+	})
+
+	keyVaultName := requiredAcceptanceEnvironment(t, "ARM_RBAC_KEY_VAULT_NAME")
+	principalID := requiredAcceptanceEnvironment(t, "AZURE_OBJECT_ID")
+	keyVaultScope := existingBuildKeyVaultScope(os.Getenv("ARM_SUBSCRIPTION_ID"), os.Getenv("ARM_RESOURCE_GROUP_NAME"), keyVaultName)
+	roleAssignmentID := existingBuildKeyVaultRoleAssignmentID(keyVaultScope, principalID)
+	assertNoDirectAcceptanceKeyVaultSecretsOfficerRoleAssignment(t, keyVaultScope, principalID)
+	defer cleanupAcceptanceKeyVaultSecretsOfficerRoleAssignment(t, keyVaultScope, principalID, roleAssignmentID)
+
+	acctest.TestPlugin(t, &acctest.PluginTestCase{
+		Name:     "test-azure-managedisk-windows-existing-key-vault-rbac-default-role",
+		Type:     "azure-arm",
+		Template: testBuilderAccManagedDiskWindowsExistingKeyVaultRBAC,
+		Check: func(buildCommand *exec.Cmd, logfile string) error {
+			if buildCommand.ProcessState != nil && buildCommand.ProcessState.ExitCode() != 0 {
+				return fmt.Errorf("Bad exit code. Logfile: %s", logfile)
+			}
+			return nil
+		},
+	})
+
+	if actualRoleAssignmentID := waitForAcceptanceKeyVaultSecretsOfficerRoleAssignment(t, keyVaultScope, principalID); !strings.EqualFold(actualRoleAssignmentID, roleAssignmentID) {
+		t.Fatalf("Expected Packer to create deterministic Key Vault role assignment %q, got %q", roleAssignmentID, actualRoleAssignmentID)
+	}
+	waitForNoActivePackerCertificateSecrets(t, keyVaultName)
+}
+
+func TestKeyVaultAcceptanceTemplatesUseDefaultRoleAssignment(t *testing.T) {
+	testCases := []struct {
+		name                 string
+		template             string
+		expectsExistingVault bool
+	}{
+		{
+			name:     "temporary Key Vault",
+			template: testBuilderAccManagedDiskWindowsTemporaryKeyVaultRBAC,
+		},
+		{
+			name:                 "existing Key Vault in the build resource group",
+			template:             testBuilderAccManagedDiskWindowsExistingKeyVaultRBAC,
+			expectsExistingVault: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var document struct {
+				Builders []map[string]interface{} `json:"builders"`
+			}
+			if err := json.Unmarshal([]byte(testCase.template), &document); err != nil {
+				t.Fatalf("Expected valid acceptance template JSON: %v", err)
+			}
+			if len(document.Builders) != 1 {
+				t.Fatalf("Expected one builder, got %d", len(document.Builders))
+			}
+
+			builder := document.Builders[0]
+			if _, configured := builder["build_key_vault_assign_rbac_role"]; configured {
+				t.Fatal("Acceptance template must omit build_key_vault_assign_rbac_role to cover the default assignment behaviour")
+			}
+			if enabled, ok := builder["build_key_vault_enable_rbac_authorization"].(bool); !ok || !enabled {
+				t.Fatal("Acceptance template must enable Key Vault RBAC authorization")
+			}
+			if !testCase.expectsExistingVault {
+				return
+			}
+			if _, ok := builder["build_key_vault_name"]; !ok {
+				t.Fatal("Existing Key Vault acceptance template must configure build_key_vault_name")
+			}
+			if deleteSecret, ok := builder["build_key_vault_delete_secret"].(bool); !ok || !deleteSecret {
+				t.Fatal("Existing Key Vault acceptance template must request certificate-secret cleanup")
+			}
+			if _, ok := builder["build_resource_group_name"]; !ok {
+				t.Fatal("Existing Key Vault acceptance template must use the build resource group")
+			}
+		})
+	}
+}
+
+func TestExistingBuildKeyVaultScope(t *testing.T) {
+	actual := existingBuildKeyVaultScope("subscription-id", "key-vault-rg", "key-vault-name")
+	expected := "/subscriptions/subscription-id/resourceGroups/key-vault-rg/providers/Microsoft.KeyVault/vaults/key-vault-name"
+	if actual != expected {
+		t.Fatalf("Expected Key Vault scope %q, got %q", expected, actual)
+	}
+}
+
+func TestExistingBuildKeyVaultRoleAssignmentID(t *testing.T) {
+	scope := existingBuildKeyVaultScope("subscription-id", "key-vault-rg", "key-vault-name")
+	actual := existingBuildKeyVaultRoleAssignmentID(scope, "principal-id")
+	expected := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignments/%s", scope, keyVaultRoleAssignmentName(scope, "principal-id"))
+	if actual != expected {
+		t.Fatalf("Expected deterministic Key Vault role assignment ID %q, got %q", expected, actual)
+	}
 }
 
 // TODO Implement this test to validate client cert auth
@@ -349,6 +473,146 @@ func deleteGalleryVersions(t *testing.T, subscriptionID string, resourceGroupNam
 	}
 }
 
+type acceptanceRoleAssignment struct {
+	ID    string `json:"id"`
+	Scope string `json:"scope"`
+}
+
+func requiredAcceptanceEnvironment(t *testing.T, name string) string {
+	t.Helper()
+	value := os.Getenv(name)
+	if value == "" {
+		t.Fatalf("Test %s requires environment variable %s to be set", t.Name(), name)
+	}
+	return value
+}
+
+func existingBuildKeyVaultScope(subscriptionID, resourceGroupName, keyVaultName string) string {
+	return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.KeyVault/vaults/%s", subscriptionID, resourceGroupName, keyVaultName)
+}
+
+func existingBuildKeyVaultRoleAssignmentID(keyVaultScope, principalID string) string {
+	return fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignments/%s", keyVaultScope, keyVaultRoleAssignmentName(keyVaultScope, principalID))
+}
+
+func waitForAcceptanceKeyVaultSecretsOfficerRoleAssignment(t *testing.T, keyVaultScope, principalID string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastErr error
+	for {
+		assignments, err := listAcceptanceKeyVaultSecretsOfficerRoleAssignments(keyVaultScope, principalID)
+		if err == nil {
+			for _, assignment := range assignments {
+				if assignment.ID != "" && strings.EqualFold(assignment.Scope, keyVaultScope) {
+					return assignment.ID
+				}
+			}
+			lastErr = fmt.Errorf("no Key Vault Secrets Officer role assignment was returned at scope %q", keyVaultScope)
+		} else {
+			lastErr = err
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("Timed out waiting for the Key Vault Secrets Officer role assignment at scope %q: %v", keyVaultScope, lastErr)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func assertNoDirectAcceptanceKeyVaultSecretsOfficerRoleAssignment(t *testing.T, keyVaultScope, principalID string) {
+	t.Helper()
+	assignments, err := listAcceptanceKeyVaultSecretsOfficerRoleAssignments(keyVaultScope, principalID)
+	if err != nil {
+		t.Fatalf("Listing pre-existing Key Vault Secrets Officer role assignments: %v", err)
+	}
+	for _, assignment := range assignments {
+		if assignment.ID != "" && strings.EqualFold(assignment.Scope, keyVaultScope) {
+			t.Fatalf("Existing Key Vault fixture must not have a direct Key Vault Secrets Officer role assignment for the Packer identity at %q; remove stale fixture state before running this test", keyVaultScope)
+		}
+	}
+}
+
+func listAcceptanceKeyVaultSecretsOfficerRoleAssignments(keyVaultScope, principalID string) ([]acceptanceRoleAssignment, error) {
+	command := exec.Command(
+		"az", "role", "assignment", "list",
+		"--scope", keyVaultScope,
+		"--assignee-object-id", principalID,
+		"--role", "Key Vault Secrets Officer",
+		"--output", "json",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("listing Key Vault Secrets Officer role assignments: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	var assignments []acceptanceRoleAssignment
+	if err := json.Unmarshal(output, &assignments); err != nil {
+		return nil, fmt.Errorf("decoding Key Vault Secrets Officer role assignments: %w", err)
+	}
+	return assignments, nil
+}
+
+func waitForNoActivePackerCertificateSecrets(t *testing.T, keyVaultName string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastErr error
+	for {
+		secretNames, err := listActivePackerCertificateSecrets(keyVaultName)
+		if err == nil && len(secretNames) == 0 {
+			return
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("found %v", secretNames)
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("Timed out waiting for Packer certificate cleanup in Key Vault %q: %v", keyVaultName, lastErr)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func listActivePackerCertificateSecrets(keyVaultName string) ([]string, error) {
+	query := fmt.Sprintf("[?starts_with(name, '%s')].name", DefaultSecretName+"-")
+	command := exec.Command("az", "keyvault", "secret", "list", "--vault-name", keyVaultName, "--query", query, "--output", "json")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("listing active Packer certificate secrets: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	var secretNames []string
+	if err := json.Unmarshal(output, &secretNames); err != nil {
+		return nil, fmt.Errorf("decoding active Packer certificate secrets: %w", err)
+	}
+	return secretNames, nil
+}
+
+func cleanupAcceptanceKeyVaultSecretsOfficerRoleAssignment(t *testing.T, keyVaultScope, principalID, expectedRoleAssignmentID string) {
+	t.Helper()
+	assignments, err := listAcceptanceKeyVaultSecretsOfficerRoleAssignments(keyVaultScope, principalID)
+	if err != nil {
+		t.Errorf("Listing Key Vault Secrets Officer role assignments for cleanup: %v", err)
+		return
+	}
+	for _, assignment := range assignments {
+		if strings.EqualFold(assignment.ID, expectedRoleAssignmentID) {
+			deleteAcceptanceRoleAssignment(t, expectedRoleAssignmentID)
+			return
+		}
+	}
+}
+
+func deleteAcceptanceRoleAssignment(t *testing.T, roleAssignmentID string) {
+	t.Helper()
+	command := exec.Command("az", "role", "assignment", "delete", "--ids", roleAssignmentID)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Errorf("Failed to remove Key Vault role assignment %q: %v: %s", roleAssignmentID, err, strings.TrimSpace(string(output)))
+	}
+}
+
 // TODO Move these templates to separate files inside the testdata directory rather than defined strings here
 func testBuilderUserDataLinux(userdata string) string {
 	return fmt.Sprintf(`
@@ -422,6 +686,84 @@ const testBuilderAccManagedDiskWindows = `
 	  "async_resourcegroup_delete": "true",
 
 	  "location": "South Central US",
+	  "vm_size": "Standard_DS2_v2"
+	}]
+}
+`
+
+// build_key_vault_assign_rbac_role is intentionally omitted so this test covers
+// the default Key Vault Secrets Officer assignment for a Packer-created vault.
+const testBuilderAccManagedDiskWindowsTemporaryKeyVaultRBAC = `
+{
+	"variables": {
+	  "client_id": "{{env ` + "`ARM_CLIENT_ID`" + `}}",
+	  "client_secret": "{{env ` + "`ARM_CLIENT_SECRET`" + `}}",
+	  "resource_group_name": "{{env ` + "`ARM_RESOURCE_GROUP_NAME`" + `}}",
+	  "subscription_id": "{{env ` + "`ARM_SUBSCRIPTION_ID`" + `}}"
+	},
+	"builders": [{
+	  "type": "azure-arm",
+
+	  "client_id": "{{user ` + "`client_id`" + `}}",
+	  "client_secret": "{{user ` + "`client_secret`" + `}}",
+	  "subscription_id": "{{user ` + "`subscription_id`" + `}}",
+
+	  "managed_image_resource_group_name": "{{user ` + "`resource_group_name`" + `}}",
+	  "managed_image_name": "testBuilderAccManagedDiskWindowsTemporaryKeyVaultRBAC-{{timestamp}}",
+
+	  "os_type": "Windows",
+	  "image_publisher": "MicrosoftWindowsServer",
+	  "image_offer": "WindowsServer",
+	  "image_sku": "2022-datacenter",
+
+	  "communicator": "winrm",
+	  "winrm_use_ssl": "true",
+	  "winrm_insecure": "true",
+	  "winrm_timeout": "3m",
+	  "winrm_username": "packer",
+
+	  "build_key_vault_enable_rbac_authorization": true,
+	  "location": "South Central US",
+	  "vm_size": "Standard_DS2_v2"
+	}]
+}
+`
+
+// build_key_vault_assign_rbac_role is intentionally omitted so this test covers
+// the default direct assignment on an existing Key Vault in the build resource group.
+const testBuilderAccManagedDiskWindowsExistingKeyVaultRBAC = `
+{
+	"variables": {
+	  "client_id": "{{env ` + "`ARM_CLIENT_ID`" + `}}",
+	  "client_secret": "{{env ` + "`ARM_CLIENT_SECRET`" + `}}",
+	  "resource_group_name": "{{env ` + "`ARM_RESOURCE_GROUP_NAME`" + `}}",
+	  "key_vault_name": "{{env ` + "`ARM_RBAC_KEY_VAULT_NAME`" + `}}",
+	  "subscription_id": "{{env ` + "`ARM_SUBSCRIPTION_ID`" + `}}"
+	},
+	"builders": [{
+	  "type": "azure-arm",
+
+	  "client_id": "{{user ` + "`client_id`" + `}}",
+	  "client_secret": "{{user ` + "`client_secret`" + `}}",
+	  "subscription_id": "{{user ` + "`subscription_id`" + `}}",
+
+	  "build_resource_group_name": "{{user ` + "`resource_group_name`" + `}}",
+	  "build_key_vault_name": "{{user ` + "`key_vault_name`" + `}}",
+	  "build_key_vault_enable_rbac_authorization": true,
+	  "build_key_vault_delete_secret": true,
+	  "managed_image_resource_group_name": "{{user ` + "`resource_group_name`" + `}}",
+	  "managed_image_name": "testBuilderAccManagedDiskWindowsExistingKeyVaultRBAC-{{timestamp}}",
+
+	  "os_type": "Windows",
+	  "image_publisher": "MicrosoftWindowsServer",
+	  "image_offer": "WindowsServer",
+	  "image_sku": "2022-datacenter",
+
+	  "communicator": "winrm",
+	  "winrm_use_ssl": "true",
+	  "winrm_insecure": "true",
+	  "winrm_timeout": "3m",
+	  "winrm_username": "packer",
 	  "vm_size": "Standard_DS2_v2"
 	}]
 }

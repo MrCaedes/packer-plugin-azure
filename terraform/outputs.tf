@@ -28,3 +28,11 @@ output "virtual_network_name" {
 output "virtual_network_subnet_name" {
   value = azurerm_subnet.subnet.name
 }
+
+output "key_vault_name" {
+  value = azurerm_key_vault.vault.name
+}
+
+output "rbac_key_vault_name" {
+  value = azurerm_key_vault.rbac_fixture.name
+}
