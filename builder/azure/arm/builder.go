@@ -48,6 +48,14 @@ const (
 	DefaultSecretName = "packerKeyVaultSecret"
 )
 
+func existingBuildKeyVaultPreflightSteps(client *AzureClient, ui packersdk.Ui, config *Config) []multistep.Step {
+	steps := []multistep.Step{NewStepValidateExistingBuildKeyVault(client, ui, config)}
+	if config.BuildKeyVaultEnableRBACAuthorization && config.shouldAssignBuildKeyVaultRBACRole() {
+		steps = append(steps, NewStepEnsureKeyVaultRBACRole(client, ui, config))
+	}
+	return steps
+}
+
 func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstructure().HCL2Spec() }
 
 func (b *Builder) Prepare(raws ...interface{}) ([]string, []string, error) {
@@ -432,9 +440,7 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 				NewStepDeployTemplate(azureClient, ui, &b.config, keyVaultDeploymentName, GetCommunicatorSpecificKeyVaultDeployment, KeyVaultTemplate),
 			)
 		} else {
-			if b.config.BuildKeyVaultEnableRBACAuthorization && b.config.shouldAssignBuildKeyVaultRBACRole() {
-				steps = append(steps, NewStepEnsureKeyVaultRBACRole(azureClient, ui, &b.config))
-			}
+			steps = append(steps, existingBuildKeyVaultPreflightSteps(azureClient, ui, &b.config)...)
 
 			if b.config.Comm.Type == "winrm" {
 				steps = append(steps, NewStepCertificateInKeyVault(azureClient, ui, &b.config, b.config.winrmCertificate, b.config.WinrmExpirationTime))

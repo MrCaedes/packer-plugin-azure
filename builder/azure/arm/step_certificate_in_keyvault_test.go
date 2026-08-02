@@ -272,6 +272,42 @@ func TestStepCertificateInKeyVaultCleanupUsesPreResolvedVaultURIWhenWriteHasNoSe
 	}
 }
 
+func TestStepCertificateInKeyVaultUsesPreflightEndpointForSecretCleanup(t *testing.T) {
+	state := newCertificateInKeyVaultState()
+	state.Put(constants.ArmKeyVaultDataPlaneEndpoint, "https://test-key-vault.vault.azure.net")
+	lookupCalls := 0
+	step := &StepCertificateInKeyVault{
+		config: &Config{
+			BuildKeyVaultName:         "testKeyVaultName",
+			BuildKeyVaultDeleteSecret: true,
+			tmpKeyVaultSecretName:     "testKeyVaultSecretName",
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		set: func(context.Context, secrets.SecretId) error {
+			return nil
+		},
+		getVaultURI: func(context.Context, string, string, string) (string, error) {
+			lookupCalls++
+			return "", fmt.Errorf("preflight endpoint should have been used")
+		},
+		deleteSecret: func(_ context.Context, endpoint, _ string) error {
+			if endpoint != "https://test-key-vault.vault.azure.net" {
+				t.Fatalf("Expected cached endpoint, got %q", endpoint)
+			}
+			return nil
+		},
+	}
+
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
+		t.Fatalf("Expected certificate step to succeed with preflight endpoint, got %v", action)
+	}
+	if lookupCalls != 0 {
+		t.Fatalf("Expected no Key Vault endpoint lookup after preflight, got %d calls", lookupCalls)
+	}
+	step.Cleanup(state)
+}
+
 func TestStepCertificateInKeyVaultRunStopsBeforeWriteWhenVaultURILookupFails(t *testing.T) {
 	state := newCertificateInKeyVaultState()
 	deleteCalls := 0

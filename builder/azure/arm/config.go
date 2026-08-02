@@ -429,7 +429,10 @@ type Config struct {
 	// Specify an existing resource group to run the build in.
 	BuildResourceGroupName string `mapstructure:"build_resource_group_name"`
 	// Specify an existing key vault to use for uploading the certificate for the
-	// instance to connect.
+	// instance to connect. Before writing the certificate, Packer reads the vault
+	// and verifies that it is enabled for VM deployment and in the same location
+	// as the build VM. The Packer identity requires Microsoft.KeyVault/vaults/read
+	// at the vault scope or above.
 	BuildKeyVaultName string `mapstructure:"build_key_vault_name"`
 	// Specify the secret name to use for the certificate created in the key vault.
 	// When build_key_vault_delete_secret is true, this is the prefix of a unique,
@@ -456,7 +459,8 @@ type Config struct {
 	BuildKeyVaultSKU string `mapstructure:"build_key_vault_sku"`
 	// Enable Azure RBAC authorization for the build Key Vault instead of creating
 	// Key Vault access policies. For an existing Key Vault, the vault must already
-	// use RBAC authorization; Packer does not change its authorization model.
+	// use RBAC authorization; Packer verifies this before writing the certificate
+	// and does not change its authorization model.
 	// Defaults to false.
 	BuildKeyVaultEnableRBACAuthorization bool `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false"`
 	// When build_key_vault_enable_rbac_authorization is true, attempt to grant the

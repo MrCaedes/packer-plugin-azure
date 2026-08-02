@@ -31,6 +31,7 @@ const (
 	ArmNsgName                                                        string = "arm.NsgName"
 	ArmKeyVaultName                                                   string = "arm.KeyVaultName"
 	ArmKeyVaultSecretName                                             string = "arm.KeyVaultSecretName"
+	ArmKeyVaultDataPlaneEndpoint                                      string = "arm.KeyVaultDataPlaneEndpoint"
 	ArmLocation                                                       string = "arm.Location"
 	ArmOSDiskUri                                                      string = "arm.OSDiskUri"
 	ArmAdditionalDiskVhds                                             string = "arm.AdditionalDiskVhds"

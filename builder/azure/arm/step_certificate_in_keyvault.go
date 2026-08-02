@@ -193,28 +193,32 @@ func (s *StepCertificateInKeyVault) Run(ctx context.Context, state multistep.Sta
 			return multistep.ActionHalt
 		}
 
-		getVaultURI := s.getVaultURI
-		if getVaultURI == nil {
-			getVaultURI = s.getKeyVaultURI
-		}
-		lookupTimeout := 15 * time.Minute
-		if s.client != nil && s.client.PollingDuration > 0 {
-			lookupTimeout = s.client.PollingDuration
-		}
-		lookupContext, cancel := context.WithTimeout(ctx, lookupTimeout)
-		defer cancel()
+		if endpoint, ok := state.GetOk(constants.ArmKeyVaultDataPlaneEndpoint); ok {
+			s.keyVaultEndpoint = endpoint.(string)
+		} else {
+			getVaultURI := s.getVaultURI
+			if getVaultURI == nil {
+				getVaultURI = s.getKeyVaultURI
+			}
+			lookupTimeout := 15 * time.Minute
+			if s.client != nil && s.client.PollingDuration > 0 {
+				lookupTimeout = s.client.PollingDuration
+			}
+			lookupContext, cancel := context.WithTimeout(ctx, lookupTimeout)
+			defer cancel()
 
-		vaultURI, err := getVaultURI(lookupContext, subscriptionId, resourceGroupName, keyVaultName)
-		if err != nil {
-			s.error(fmt.Errorf("failed to resolve the Key Vault data-plane URI before creating certificate secret %q: %s", keyVaultSecretName, err))
-			return multistep.ActionHalt
+			vaultURI, err := getVaultURI(lookupContext, subscriptionId, resourceGroupName, keyVaultName)
+			if err != nil {
+				s.error(fmt.Errorf("failed to resolve the Key Vault data-plane URI before creating certificate secret %q: %s", keyVaultSecretName, err))
+				return multistep.ActionHalt
+			}
+			keyVaultEndpoint, err := keyVaultEndpointFromURI(vaultURI)
+			if err != nil {
+				s.error(fmt.Errorf("failed to validate the Key Vault data-plane URI before creating certificate secret %q: %s", keyVaultSecretName, err))
+				return multistep.ActionHalt
+			}
+			s.keyVaultEndpoint = keyVaultEndpoint
 		}
-		keyVaultEndpoint, err := keyVaultEndpointFromURI(vaultURI)
-		if err != nil {
-			s.error(fmt.Errorf("failed to validate the Key Vault data-plane URI before creating certificate secret %q: %s", keyVaultSecretName, err))
-			return multistep.ActionHalt
-		}
-		s.keyVaultEndpoint = keyVaultEndpoint
 	}
 
 	s.secretWriteAttempted = true
