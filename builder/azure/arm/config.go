@@ -471,7 +471,9 @@ type Config struct {
 	// Microsoft.Authorization/roleAssignments/write at the vault scope or above.
 	// The data-plane role does not replace the Azure Resource Manager permissions
 	// Packer already needs, including Microsoft.KeyVault/vaults/secrets/write when
-	// it uploads a certificate to an existing Key Vault.
+	// it uploads a certificate to an existing Key Vault. When Packer assigns the
+	// role to an existing vault and secret cleanup is enabled, it retries a 403
+	// data-plane deletion for up to two minutes while the role assignment propagates.
 	BuildKeyVaultAssignRBACRole *bool `mapstructure:"build_key_vault_assign_rbac_role" required:"false"`
 
 	// Skip creating the build key vault during Windows build.

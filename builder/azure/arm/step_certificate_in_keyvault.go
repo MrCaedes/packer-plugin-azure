@@ -5,6 +5,7 @@ package arm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -22,18 +23,37 @@ import (
 
 const keyVaultSecretsAPIVersion = "7.5"
 
+const (
+	keyVaultRBACRolePropagationRetryInterval = 10 * time.Second
+	keyVaultRBACRolePropagationMaxRetries    = 12
+)
+
+type keyVaultSecretDeleteError struct {
+	statusCode int
+	err        error
+}
+
+func (e *keyVaultSecretDeleteError) Error() string {
+	return e.err.Error()
+}
+
+func (e *keyVaultSecretDeleteError) Unwrap() error {
+	return e.err
+}
+
 type StepCertificateInKeyVault struct {
-	config               *Config
-	client               *AzureClient
-	set                  func(ctx context.Context, id secrets.SecretId) error
-	deleteSecret         func(ctx context.Context, secretURI, secretName string) error
-	getVaultURI          func(ctx context.Context, subscriptionID, resourceGroupName, keyVaultName string) (string, error)
-	say                  func(message string)
-	error                func(e error)
-	certificate          string
-	expirationTime       time.Duration
-	secretWriteAttempted bool
-	keyVaultEndpoint     string
+	config                 *Config
+	client                 *AzureClient
+	set                    func(ctx context.Context, id secrets.SecretId) error
+	deleteSecret           func(ctx context.Context, secretURI, secretName string) error
+	getVaultURI            func(ctx context.Context, subscriptionID, resourceGroupName, keyVaultName string) (string, error)
+	waitForRolePropagation func(ctx context.Context, delay time.Duration) bool
+	say                    func(message string)
+	error                  func(e error)
+	certificate            string
+	expirationTime         time.Duration
+	secretWriteAttempted   bool
+	keyVaultEndpoint       string
 }
 
 func NewStepCertificateInKeyVault(client *AzureClient, ui packersdk.Ui, config *Config, certificate string, expirationTime time.Duration) *StepCertificateInKeyVault {
@@ -49,6 +69,7 @@ func NewStepCertificateInKeyVault(client *AzureClient, ui packersdk.Ui, config *
 	step.set = step.setCertificate
 	step.deleteSecret = step.deleteCertificate
 	step.getVaultURI = step.getKeyVaultURI
+	step.waitForRolePropagation = waitForKeyVaultRBACRolePropagation
 	return step
 }
 
@@ -152,7 +173,14 @@ func deleteKeyVaultSecret(ctx context.Context, keyVaultClient sdkclient.BaseClie
 		}()
 	}
 	if err != nil {
-		return fmt.Errorf("deleting Key Vault secret: %w", err)
+		statusCode := 0
+		if response != nil && response.Response != nil {
+			statusCode = response.StatusCode
+		}
+		return &keyVaultSecretDeleteError{
+			statusCode: statusCode,
+			err:        fmt.Errorf("deleting Key Vault secret: %w", err),
+		}
 	}
 
 	return nil
@@ -254,9 +282,50 @@ func (s *StepCertificateInKeyVault) Cleanup(state multistep.StateBag) {
 	}
 
 	s.say("Deleting the Packer certificate secret from the KeyVault...")
-	if err := s.deleteSecret(ctx, s.keyVaultEndpoint, keyVaultSecretName); err != nil {
+	if err := s.deleteCertificateDuringCleanup(ctx, keyVaultSecretName); err != nil {
 		s.reportCleanupFailure(state, fmt.Errorf("failed to delete Packer certificate secret %q from the Key Vault during cleanup: %w; delete it manually", keyVaultSecretName, err))
 	}
+}
+
+func (s *StepCertificateInKeyVault) deleteCertificateDuringCleanup(ctx context.Context, keyVaultSecretName string) error {
+	for retry := 0; ; retry++ {
+		err := s.deleteSecret(ctx, s.keyVaultEndpoint, keyVaultSecretName)
+		if err == nil ||
+			!s.config.BuildKeyVaultEnableRBACAuthorization ||
+			!s.config.shouldAssignBuildKeyVaultRBACRole() ||
+			!isKeyVaultRBACRolePropagationError(err) ||
+			retry >= keyVaultRBACRolePropagationMaxRetries {
+			return err
+		}
+
+		if retry == 0 {
+			s.say("Waiting for the Key Vault RBAC role assignment to propagate before retrying certificate secret cleanup...")
+		}
+		waitForRolePropagation := s.waitForRolePropagation
+		if waitForRolePropagation == nil {
+			waitForRolePropagation = waitForKeyVaultRBACRolePropagation
+		}
+		if !waitForRolePropagation(ctx, keyVaultRBACRolePropagationRetryInterval) {
+			return err
+		}
+	}
+}
+
+func waitForKeyVaultRBACRolePropagation(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func isKeyVaultRBACRolePropagationError(err error) bool {
+	var deleteError *keyVaultSecretDeleteError
+	return errors.As(err, &deleteError) && deleteError.statusCode == http.StatusForbidden
 }
 
 func (s *StepCertificateInKeyVault) reportCleanupFailure(state multistep.StateBag, err error) {

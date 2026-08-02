@@ -6,10 +6,15 @@ package arm
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-azure-sdk/resource-manager/authorization/2022-04-01/roleassignments"
+	sdkEnvironments "github.com/hashicorp/go-azure-sdk/sdk/environments"
+	"github.com/hashicorp/go-azure-sdk/sdk/odata"
 	commonclient "github.com/hashicorp/packer-plugin-azure/builder/azure/common/client"
 	"github.com/hashicorp/packer-plugin-azure/builder/azure/common/constants"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
@@ -138,5 +143,131 @@ func TestKeyVaultRoleAssignmentNameIsStableAndDistinctByPrincipal(t *testing.T) 
 	}
 	if !strings.Contains(first, "-") || len(first) != 36 {
 		t.Fatalf("Expected a UUID-formatted role assignment name, got %q", first)
+	}
+}
+
+func TestIsRoleAssignmentAlreadyExistsUsesCurrentCreateResponse(t *testing.T) {
+	roleAssignmentExists := "RoleAssignmentExists"
+	authorizationFailed := "AuthorizationFailed"
+
+	testCases := []struct {
+		name   string
+		result roleassignments.CreateOperationResponse
+		err    error
+		want   bool
+	}{
+		{
+			name: "current response reports existing assignment",
+			result: roleassignments.CreateOperationResponse{
+				OData: &odata.OData{Error: &odata.Error{Code: &roleAssignmentExists}},
+			},
+			err:  fmt.Errorf("unexpected status 409"),
+			want: true,
+		},
+		{
+			name: "unrelated current response is not treated as an existing assignment",
+			result: roleassignments.CreateOperationResponse{
+				OData: &odata.OData{Error: &odata.Error{Code: &authorizationFailed}},
+			},
+			err:  fmt.Errorf("unexpected status 403"),
+			want: false,
+		},
+		{
+			name: "SDK error text fallback",
+			err:  fmt.Errorf("unexpected status 409 with RoleAssignmentExists"),
+			want: true,
+		},
+		{
+			name: "successful create is not a conflict",
+			want: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isRoleAssignmentAlreadyExists(testCase.result, testCase.err); got != testCase.want {
+				t.Fatalf("Expected existing-assignment detection to be %t, got %t", testCase.want, got)
+			}
+		})
+	}
+}
+
+func TestStepEnsureKeyVaultRBACRoleCreateRoleAssignmentUsesCurrentResponse(t *testing.T) {
+	roleAssignmentExists := "RoleAssignmentExists"
+	testCases := []struct {
+		name         string
+		responseCode int
+		responseBody string
+		wantErr      bool
+	}{
+		{
+			name:         "existing assignment",
+			responseCode: http.StatusConflict,
+			responseBody: `{"error":{"code":"RoleAssignmentExists","message":"The role assignment already exists."}}`,
+		},
+		{
+			name:         "successful assignment",
+			responseCode: http.StatusCreated,
+			responseBody: `{}`,
+		},
+		{
+			name:         "unrelated failure despite stale prior error",
+			responseCode: http.StatusForbidden,
+			responseBody: `{"error":{"code":"AuthorizationFailed","message":"The client does not have authorization."}}`,
+			wantErr:      true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodPut {
+					t.Errorf("Expected PUT request, got %q", request.Method)
+				}
+				responseWriter.Header().Set("Content-Type", "application/json")
+				responseWriter.WriteHeader(testCase.responseCode)
+				_, _ = responseWriter.Write([]byte(testCase.responseBody))
+			}))
+			defer server.Close()
+
+			roleAssignmentsClient, err := roleassignments.NewRoleAssignmentsClientWithBaseURI(sdkEnvironments.ResourceManagerAPI(server.URL))
+			if err != nil {
+				t.Fatalf("Creating test role assignments client: %v", err)
+			}
+			roleAssignmentsClient.Client.Transport = server.Client().Transport
+			roleAssignmentsClient.Client.AuthorizeRequest = nil
+			step := &StepEnsureKeyVaultRBACRole{
+				client: &AzureClient{
+					RoleAssignmentsClient: *roleAssignmentsClient,
+					LastError:             azureErrorResponse{ErrorDetails: azureErrorDetails{Code: roleAssignmentExists}},
+				},
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = step.createRoleAssignment(
+				ctx,
+				roleassignments.NewScopedRoleAssignmentID("/subscriptions/test-subscription", "test-role-assignment"),
+				roleassignments.RoleAssignmentCreateParameters{},
+			)
+			if testCase.wantErr && err == nil {
+				t.Fatal("Expected the current authorization failure to be returned")
+			}
+			if !testCase.wantErr && err != nil {
+				t.Fatalf("Expected an existing assignment to be idempotent, got %v", err)
+			}
+		})
+	}
+}
+
+func TestStepEnsureKeyVaultRBACRoleCreateRoleAssignmentRequiresConfiguredClient(t *testing.T) {
+	step := &StepEnsureKeyVaultRBACRole{}
+	err := step.createRoleAssignment(
+		context.Background(),
+		roleassignments.NewScopedRoleAssignmentID("/subscriptions/test-subscription", "test-role-assignment"),
+		roleassignments.RoleAssignmentCreateParameters{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("Expected an actionable unconfigured-client error, got %v", err)
 	}
 }

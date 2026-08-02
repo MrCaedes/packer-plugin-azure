@@ -5,6 +5,7 @@ package arm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -128,6 +129,169 @@ func TestStepCertificateInKeyVaultCleanupDeletesWrittenSecret(t *testing.T) {
 	}
 	if actualSecretName != state.Get(constants.ArmKeyVaultSecretName).(string) {
 		t.Fatalf("Expected cleanup to delete secret %q, got %q", state.Get(constants.ArmKeyVaultSecretName).(string), actualSecretName)
+	}
+}
+
+func TestStepCertificateInKeyVaultCleanupRetriesForbiddenWhileDefaultRBACRolePropagates(t *testing.T) {
+	state := newCertificateInKeyVaultState()
+	deleteCalls := 0
+	step := &StepCertificateInKeyVault{
+		config: &Config{
+			BuildKeyVaultName:                    "testKeyVaultName",
+			BuildKeyVaultDeleteSecret:            true,
+			BuildKeyVaultEnableRBACAuthorization: true,
+			tmpKeyVaultSecretName:                "testKeyVaultSecretName",
+		},
+		waitForRolePropagation: func(context.Context, time.Duration) bool { return true },
+		say:                    func(string) {},
+		error:                  func(error) {},
+		deleteSecret: func(context.Context, string, string) error {
+			deleteCalls++
+			if deleteCalls == 1 {
+				return &keyVaultSecretDeleteError{statusCode: http.StatusForbidden, err: errors.New("forbidden while role assignment propagates")}
+			}
+			return nil
+		},
+	}
+	step.secretWriteAttempted = true
+	step.keyVaultEndpoint = "https://test-key-vault.vault.azure.net"
+	step.Cleanup(state)
+
+	if deleteCalls != 2 {
+		t.Fatalf("Expected a retry after the initial RBAC propagation failure, got %d delete calls", deleteCalls)
+	}
+	if _, hasError := state.GetOk(constants.Error); hasError {
+		t.Fatal("Expected successful retry not to report a cleanup error")
+	}
+}
+
+func TestStepCertificateInKeyVaultCleanupDoesNotRetryNonRBACDeleteFailure(t *testing.T) {
+	state := newCertificateInKeyVaultState()
+	deleteCalls := 0
+	step := &StepCertificateInKeyVault{
+		config: &Config{
+			BuildKeyVaultName:                    "testKeyVaultName",
+			BuildKeyVaultDeleteSecret:            true,
+			BuildKeyVaultEnableRBACAuthorization: true,
+			tmpKeyVaultSecretName:                "testKeyVaultSecretName",
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		deleteSecret: func(context.Context, string, string) error {
+			deleteCalls++
+			return errors.New("network unavailable")
+		},
+	}
+	step.secretWriteAttempted = true
+	step.keyVaultEndpoint = "https://test-key-vault.vault.azure.net"
+	step.Cleanup(state)
+
+	if deleteCalls != 1 {
+		t.Fatalf("Expected one non-RBAC cleanup attempt, got %d", deleteCalls)
+	}
+	if _, hasError := state.GetOk(constants.Error); !hasError {
+		t.Fatal("Expected the permanent cleanup failure to be reported")
+	}
+}
+
+func TestStepCertificateInKeyVaultCleanupDoesNotRetryWhenRoleAssignmentIsDisabled(t *testing.T) {
+	state := newCertificateInKeyVaultState()
+	assignRole := false
+	deleteCalls := 0
+	step := &StepCertificateInKeyVault{
+		config: &Config{
+			BuildKeyVaultName:                    "testKeyVaultName",
+			BuildKeyVaultDeleteSecret:            true,
+			BuildKeyVaultEnableRBACAuthorization: true,
+			BuildKeyVaultAssignRBACRole:          &assignRole,
+			tmpKeyVaultSecretName:                "testKeyVaultSecretName",
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		deleteSecret: func(context.Context, string, string) error {
+			deleteCalls++
+			return &keyVaultSecretDeleteError{statusCode: http.StatusForbidden, err: errors.New("forbidden")}
+		},
+	}
+	step.secretWriteAttempted = true
+	step.keyVaultEndpoint = "https://test-key-vault.vault.azure.net"
+	step.Cleanup(state)
+
+	if deleteCalls != 1 {
+		t.Fatalf("Expected one cleanup attempt when role assignment is disabled, got %d", deleteCalls)
+	}
+}
+
+func TestStepCertificateInKeyVaultCleanupBoundsRBACPropagationRetries(t *testing.T) {
+	deleteCalls := 0
+	waitCalls := 0
+	step := &StepCertificateInKeyVault{
+		config: &Config{
+			BuildKeyVaultName:                    "testKeyVaultName",
+			BuildKeyVaultDeleteSecret:            true,
+			BuildKeyVaultEnableRBACAuthorization: true,
+			tmpKeyVaultSecretName:                "testKeyVaultSecretName",
+		},
+		waitForRolePropagation: func(context.Context, time.Duration) bool {
+			waitCalls++
+			return true
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		deleteSecret: func(context.Context, string, string) error {
+			deleteCalls++
+			return &keyVaultSecretDeleteError{statusCode: http.StatusForbidden, err: errors.New("forbidden")}
+		},
+	}
+	if err := step.deleteCertificateDuringCleanup(context.Background(), "testKeyVaultSecretName"); err == nil {
+		t.Fatal("Expected persistent RBAC propagation failure to be returned")
+	}
+	if deleteCalls != keyVaultRBACRolePropagationMaxRetries+1 {
+		t.Fatalf("Expected %d bounded delete attempts, got %d", keyVaultRBACRolePropagationMaxRetries+1, deleteCalls)
+	}
+	if waitCalls != keyVaultRBACRolePropagationMaxRetries {
+		t.Fatalf("Expected %d bounded propagation waits, got %d", keyVaultRBACRolePropagationMaxRetries, waitCalls)
+	}
+}
+
+func TestStepCertificateInKeyVaultCleanupStopsWhenDefaultPropagationWaitIsCancelled(t *testing.T) {
+	deleteCalls := 0
+	step := &StepCertificateInKeyVault{
+		config: &Config{
+			BuildKeyVaultEnableRBACAuthorization: true,
+		},
+		say: func(string) {},
+		deleteSecret: func(context.Context, string, string) error {
+			deleteCalls++
+			return &keyVaultSecretDeleteError{statusCode: http.StatusForbidden, err: errors.New("forbidden")}
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := step.deleteCertificateDuringCleanup(ctx, "testKeyVaultSecretName"); err == nil {
+		t.Fatal("Expected cancelled default propagation wait to return the delete failure")
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("Expected cancelled default propagation wait to stop after one attempt, got %d", deleteCalls)
+	}
+}
+
+func TestWaitForKeyVaultRBACRolePropagationStopsForCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if waitForKeyVaultRBACRolePropagation(ctx, time.Hour) {
+		t.Fatal("Expected a cancelled propagation context to stop waiting")
+	}
+}
+
+func TestWaitForKeyVaultRBACRolePropagationCompletesAfterDelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if !waitForKeyVaultRBACRolePropagation(ctx, 0) {
+		t.Fatal("Expected an elapsed propagation delay to permit a retry")
 	}
 }
 
@@ -400,6 +564,35 @@ func TestDeleteKeyVaultSecretAcceptsNotFound(t *testing.T) {
 
 	if err := deleteKeyVaultSecret(ctx, keyVaultClient, "testKeyVaultSecretName"); err != nil {
 		t.Fatalf("Expected a 404 delete response to succeed, got %v", err)
+	}
+}
+
+func TestDeleteKeyVaultSecretReportsRequestConstructionFailure(t *testing.T) {
+	keyVaultClient := dataplane.NewDataPlaneClient("https://test-key-vault.vault.azure.net", "secrets", keyVaultSecretsAPIVersion)
+	err := deleteKeyVaultSecret(context.Background(), keyVaultClient, "testKeyVaultSecretName")
+	if err == nil || !strings.Contains(err.Error(), "creating Key Vault secret delete request") {
+		t.Fatalf("Expected request-construction error, got %v", err)
+	}
+}
+
+func TestDeleteKeyVaultSecretIncludesForbiddenStatusForRBACRetry(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		responseWriter.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	keyVaultClient := dataplane.NewDataPlaneClient(server.URL, "secrets", keyVaultSecretsAPIVersion)
+	keyVaultClient.SetTransport(server.Client().Transport)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := deleteKeyVaultSecret(ctx, keyVaultClient, "testKeyVaultSecretName")
+	if err == nil {
+		t.Fatal("Expected a 403 delete response to fail")
+	}
+	if !isKeyVaultRBACRolePropagationError(err) {
+		t.Fatalf("Expected a 403 delete response to be eligible for a bounded RBAC propagation retry, got %v", err)
 	}
 }
 

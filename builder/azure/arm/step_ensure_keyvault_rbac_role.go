@@ -42,16 +42,28 @@ func (s *StepEnsureKeyVaultRBACRole) createRoleAssignment(ctx context.Context, i
 		return fmt.Errorf("Azure role assignments client is not configured")
 	}
 
-	_, err := s.client.RoleAssignmentsClient.Create(ctx, id, input)
+	result, err := s.client.RoleAssignmentsClient.Create(ctx, id, input)
 	if err == nil {
 		return nil
 	}
 
-	if strings.EqualFold(s.client.LastError.ErrorDetails.Code, "RoleAssignmentExists") || strings.Contains(strings.ToLower(err.Error()), "roleassignmentexists") {
+	if isRoleAssignmentAlreadyExists(result, err) {
 		return nil
 	}
 
 	return err
+}
+
+func isRoleAssignmentAlreadyExists(result roleassignments.CreateOperationResponse, err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if result.OData != nil && result.OData.Error != nil && result.OData.Error.Code != nil && strings.EqualFold(*result.OData.Error.Code, "RoleAssignmentExists") {
+		return true
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "roleassignmentexists")
 }
 
 func (s *StepEnsureKeyVaultRBACRole) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
