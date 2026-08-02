@@ -13,6 +13,7 @@ import (
 
 	"net/http"
 
+	"github.com/hashicorp/go-azure-sdk/resource-manager/authorization/2022-04-01/roleassignments"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/compute/2022-03-01/images"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/compute/2022-03-01/virtualmachineimages"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/compute/2022-03-01/virtualmachines"
@@ -50,6 +51,7 @@ type AzureClient struct {
 	virtualmachines.VirtualMachinesClient
 	secrets.SecretsClient
 	vaults.VaultsClient
+	roleassignments.RoleAssignmentsClient
 	disks.DisksClient
 	resourcegroups.ResourceGroupsClient
 	snapshots.SnapshotsClient
@@ -149,6 +151,16 @@ func NewAzureClient(ctx context.Context, storageAccountName string, cloud *envir
 	secretsClient.Client.RequestMiddlewares = &requestMiddleware
 	secretsClient.Client.UserAgent = fmt.Sprintf("%s %s", useragent.String(version.AzurePluginVersion.FormattedVersion()), vaultsClient.Client.UserAgent)
 	azureClient.SecretsClient = *secretsClient
+
+	roleAssignmentsClient, err := roleassignments.NewRoleAssignmentsClientWithBaseURI(cloud.ResourceManager)
+	if err != nil {
+		return nil, err
+	}
+	roleAssignmentsClient.Client.Authorizer = resourceManagerAuthorizer
+	roleAssignmentsClient.Client.ResponseMiddlewares = &responseMiddleware
+	roleAssignmentsClient.Client.RequestMiddlewares = &requestMiddleware
+	roleAssignmentsClient.Client.UserAgent = fmt.Sprintf("%s %s", useragent.String(version.AzurePluginVersion.FormattedVersion()), roleAssignmentsClient.Client.UserAgent)
+	azureClient.RoleAssignmentsClient = *roleAssignmentsClient
 
 	deploymentsClient, err := deployments.NewDeploymentsClientWithBaseURI(cloud.ResourceManager)
 	if err != nil {

@@ -74,6 +74,7 @@ type FlatConfig struct {
 	BuildKeyVaultDeleteSecret                  *bool                              `mapstructure:"build_key_vault_delete_secret" required:"false" cty:"build_key_vault_delete_secret" hcl:"build_key_vault_delete_secret"`
 	BuildKeyVaultSKU                           *string                            `mapstructure:"build_key_vault_sku" cty:"build_key_vault_sku" hcl:"build_key_vault_sku"`
 	BuildKeyVaultEnableRBACAuthorization       *bool                              `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false" cty:"build_key_vault_enable_rbac_authorization" hcl:"build_key_vault_enable_rbac_authorization"`
+	BuildKeyVaultAssignRBACRole                *bool                              `mapstructure:"build_key_vault_assign_rbac_role" required:"false" cty:"build_key_vault_assign_rbac_role" hcl:"build_key_vault_assign_rbac_role"`
 	SkipCreateBuildKeyVault                    *bool                              `mapstructure:"skip_create_build_key_vault" required:"false" cty:"skip_create_build_key_vault" hcl:"skip_create_build_key_vault"`
 	DiskEncryptionSetId                        *string                            `mapstructure:"disk_encryption_set_id" cty:"disk_encryption_set_id" hcl:"disk_encryption_set_id"`
 	PrivateVirtualNetworkWithPublicIp          *bool                              `mapstructure:"private_virtual_network_with_public_ip" required:"false" cty:"private_virtual_network_with_public_ip" hcl:"private_virtual_network_with_public_ip"`
@@ -233,6 +234,7 @@ func (*FlatConfig) HCL2Spec() map[string]hcldec.Spec {
 		"build_key_vault_delete_secret":             &hcldec.AttrSpec{Name: "build_key_vault_delete_secret", Type: cty.Bool, Required: false},
 		"build_key_vault_sku":                       &hcldec.AttrSpec{Name: "build_key_vault_sku", Type: cty.String, Required: false},
 		"build_key_vault_enable_rbac_authorization": &hcldec.AttrSpec{Name: "build_key_vault_enable_rbac_authorization", Type: cty.Bool, Required: false},
+		"build_key_vault_assign_rbac_role":          &hcldec.AttrSpec{Name: "build_key_vault_assign_rbac_role", Type: cty.Bool, Required: false},
 		"skip_create_build_key_vault":               &hcldec.AttrSpec{Name: "skip_create_build_key_vault", Type: cty.Bool, Required: false},
 		"disk_encryption_set_id":                    &hcldec.AttrSpec{Name: "disk_encryption_set_id", Type: cty.String, Required: false},
 		"private_virtual_network_with_public_ip":    &hcldec.AttrSpec{Name: "private_virtual_network_with_public_ip", Type: cty.Bool, Required: false},

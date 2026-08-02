@@ -141,6 +141,7 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	builderPollingContext, builderCancel := context.WithTimeout(ctx, azureClient.PollingDuration)
 	defer builderCancel()
 	objectID := azureClient.ObjectID
+	b.config.resolvedBuildPrincipalID = objectID
 	if b.config.ClientConfig.ObjectID == "" {
 		b.config.ClientConfig.ObjectID = objectID
 	} else {
@@ -430,26 +431,32 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 				NewStepValidateTemplate(azureClient, ui, &b.config, keyVaultDeploymentName, GetCommunicatorSpecificKeyVaultDeployment),
 				NewStepDeployTemplate(azureClient, ui, &b.config, keyVaultDeploymentName, GetCommunicatorSpecificKeyVaultDeployment, KeyVaultTemplate),
 			)
-		} else if b.config.Comm.Type == "winrm" {
-			steps = append(steps, NewStepCertificateInKeyVault(azureClient, ui, &b.config, b.config.winrmCertificate, b.config.WinrmExpirationTime))
 		} else {
-			privateKey, err := ssh.ParseRawPrivateKey(b.config.Comm.SSHPrivateKey)
-			if err != nil {
-				return nil, err
-			}
-			pk, ok := privateKey.(*rsa.PrivateKey)
-			if !ok {
-				// https://learn.microsoft.com/en-us/azure/virtual-machines/windows/connect-ssh?tabs=azurecli#supported-ssh-key-formats
-				return nil, errors.New("Provided private key must be in RSA format to use for SSH on Windows on Azure")
-			}
-			secret, err := b.config.formatCertificateForKeyVault(pk)
-			if err != nil {
-				return nil, err
+			if b.config.BuildKeyVaultEnableRBACAuthorization && b.config.shouldAssignBuildKeyVaultRBACRole() {
+				steps = append(steps, NewStepEnsureKeyVaultRBACRole(azureClient, ui, &b.config))
 			}
 
-			packersdk.LogSecretFilter.Set(secret)
+			if b.config.Comm.Type == "winrm" {
+				steps = append(steps, NewStepCertificateInKeyVault(azureClient, ui, &b.config, b.config.winrmCertificate, b.config.WinrmExpirationTime))
+			} else {
+				privateKey, err := ssh.ParseRawPrivateKey(b.config.Comm.SSHPrivateKey)
+				if err != nil {
+					return nil, err
+				}
+				pk, ok := privateKey.(*rsa.PrivateKey)
+				if !ok {
+					// https://learn.microsoft.com/en-us/azure/virtual-machines/windows/connect-ssh?tabs=azurecli#supported-ssh-key-formats
+					return nil, errors.New("Provided private key must be in RSA format to use for SSH on Windows on Azure")
+				}
+				secret, err := b.config.formatCertificateForKeyVault(pk)
+				if err != nil {
+					return nil, err
+				}
 
-			steps = append(steps, NewStepCertificateInKeyVault(azureClient, ui, &b.config, secret, b.config.WinrmExpirationTime))
+				packersdk.LogSecretFilter.Set(secret)
+
+				steps = append(steps, NewStepCertificateInKeyVault(azureClient, ui, &b.config, secret, b.config.WinrmExpirationTime))
+			}
 		}
 
 		if !b.config.SkipCreateBuildKeyVault {

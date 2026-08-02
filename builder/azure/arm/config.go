@@ -454,10 +454,21 @@ type Config struct {
 	// Specify the KeyVault SKU to create during the build. Valid values are
 	// standard or premium. The default value is standard.
 	BuildKeyVaultSKU string `mapstructure:"build_key_vault_sku"`
-	// Enable Azure RBAC authorization for the temporary build Key Vault instead
-	// of creating Key Vault access policies. This applies only when Packer
-	// creates the build Key Vault and defaults to false.
+	// Enable Azure RBAC authorization for the build Key Vault instead of creating
+	// Key Vault access policies. For an existing Key Vault, the vault must already
+	// use RBAC authorization; Packer does not change its authorization model.
+	// Defaults to false.
 	BuildKeyVaultEnableRBACAuthorization bool `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false"`
+	// When build_key_vault_enable_rbac_authorization is true, attempt to grant the
+	// Packer build identity the Key Vault Secrets Officer role at the build Key
+	// Vault scope. Defaults to true. Set this to false only when that identity
+	// already has Key Vault Secrets Officer, or equivalent secret data actions,
+	// at the vault scope or above. Assigning the role requires
+	// Microsoft.Authorization/roleAssignments/write at the vault scope or above.
+	// The data-plane role does not replace the Azure Resource Manager permissions
+	// Packer already needs, including Microsoft.KeyVault/vaults/secrets/write when
+	// it uploads a certificate to an existing Key Vault.
+	BuildKeyVaultAssignRBACRole *bool `mapstructure:"build_key_vault_assign_rbac_role" required:"false"`
 
 	// Skip creating the build key vault during Windows build.
 	// This is useful for cases when a subscription has policy restrictions on key vault resources.
@@ -721,23 +732,24 @@ type Config struct {
 	SecurityEncryptionType string `mapstructure:"security_encryption_type" required:"false"`
 
 	// Runtime Values
-	UserName               string `mapstructure-to-hcl2:",skip"`
-	Password               string `mapstructure-to-hcl2:",skip"`
-	tmpAdminPassword       string
-	tmpCertificatePassword string
-	tmpResourceGroupName   string
-	tmpComputeName         string
-	tmpNicName             string
-	tmpPublicIPAddressName string
-	tmpDeploymentName      string
-	tmpKeyVaultName        string
-	tmpKeyVaultSecretName  string
-	tmpOSDiskName          string
-	tmpDataDiskName        string
-	tmpSubnetName          string
-	tmpVirtualNetworkName  string
-	tmpNsgName             string
-	tmpWinRMCertificateUrl string
+	UserName                 string `mapstructure-to-hcl2:",skip"`
+	Password                 string `mapstructure-to-hcl2:",skip"`
+	tmpAdminPassword         string
+	tmpCertificatePassword   string
+	tmpResourceGroupName     string
+	tmpComputeName           string
+	tmpNicName               string
+	tmpPublicIPAddressName   string
+	tmpDeploymentName        string
+	tmpKeyVaultName          string
+	tmpKeyVaultSecretName    string
+	tmpOSDiskName            string
+	tmpDataDiskName          string
+	tmpSubnetName            string
+	tmpVirtualNetworkName    string
+	tmpNsgName               string
+	tmpWinRMCertificateUrl   string
+	resolvedBuildPrincipalID string
 
 	// Authentication with the VM via SSH
 	sshAuthorizedKey string
@@ -1219,11 +1231,26 @@ func provideDefaultValues(c *Config) {
 		c.BuildKeyVaultSecretName = DefaultSecretName
 	}
 
+	if c.BuildKeyVaultAssignRBACRole == nil {
+		c.BuildKeyVaultAssignRBACRole = azcommon.BoolPtr(true)
+	}
+
 	if c.SecurityType == constants.ConfidentialVM && c.SecurityEncryptionType == "" {
 		c.SecurityEncryptionType = string(virtualmachines.SecurityEncryptionTypesVMGuestStateOnly)
 	}
 
 	_ = c.ClientConfig.SetDefaultValues()
+}
+
+func (c *Config) shouldAssignBuildKeyVaultRBACRole() bool {
+	return c.BuildKeyVaultAssignRBACRole == nil || *c.BuildKeyVaultAssignRBACRole
+}
+
+func (c *Config) buildKeyVaultRBACPrincipalID() string {
+	if c.resolvedBuildPrincipalID != "" {
+		return c.resolvedBuildPrincipalID
+	}
+	return c.ClientConfig.ObjectID
 }
 
 func assertTagProperties(c *Config, errs *packersdk.MultiError) {

@@ -1294,14 +1294,20 @@ func TestKeyVaultDeploymentWithRBACAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.resolvedBuildPrincipalID = "token-derived-principal"
 
 	deployment, err := GetKeyVaultDeployment(context.Background(), &c, c.winrmCertificate, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, ok := (*deployment.Properties.Parameters)["objectId"]; ok {
-		t.Error("Expected RBAC Key Vault deployment parameters to omit 'objectId'!")
+	param, ok := (*deployment.Properties.Parameters)["objectId"]
+	if !ok || param.Value == nil {
+		t.Fatal("Expected RBAC Key Vault deployment parameters to include the resolved build principal object ID!")
+	}
+	principalID, ok := (*param.Value).(string)
+	if !ok || principalID != c.buildKeyVaultRBACPrincipalID() {
+		t.Error("Expected RBAC Key Vault deployment parameters to include the resolved build principal object ID!")
 	}
 
 	templateJSON, err := json.Marshal(deployment.Properties.Template)
@@ -1313,6 +1319,9 @@ func TestKeyVaultDeploymentWithRBACAuthorization(t *testing.T) {
 		Parameters map[string]json.RawMessage `json:"parameters"`
 		Resources  []struct {
 			Type       string                     `json:"type"`
+			Name       string                     `json:"name"`
+			Scope      string                     `json:"scope"`
+			DependsOn  []string                   `json:"dependsOn"`
 			Properties map[string]json.RawMessage `json:"properties"`
 		} `json:"resources"`
 	}
@@ -1320,30 +1329,93 @@ func TestKeyVaultDeploymentWithRBACAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := document.Parameters["objectId"]; ok {
-		t.Error("Expected RBAC Key Vault template to omit the unused 'objectId' parameter!")
+	if _, ok := document.Parameters["objectId"]; !ok {
+		t.Error("Expected RBAC Key Vault template to retain the 'objectId' parameter for the role assignment!")
 	}
 
+	foundKeyVault := false
+	foundRoleAssignment := false
+	foundSecret := false
 	for _, resource := range document.Resources {
-		if resource.Type != "Microsoft.KeyVault/vaults" {
-			continue
-		}
+		switch resource.Type {
+		case "Microsoft.KeyVault/vaults":
+			foundKeyVault = true
+			if _, ok := resource.Properties["accessPolicies"]; ok {
+				t.Error("Expected RBAC Key Vault template to omit access policies!")
+			}
 
-		if _, ok := resource.Properties["accessPolicies"]; ok {
-			t.Error("Expected RBAC Key Vault template to omit access policies!")
+			var enabled bool
+			if err := json.Unmarshal(resource.Properties["enableRbacAuthorization"], &enabled); err != nil {
+				t.Fatalf("Expected RBAC Key Vault template to include enableRbacAuthorization: %v", err)
+			}
+			if !enabled {
+				t.Error("Expected RBAC Key Vault template to enable RBAC authorization!")
+			}
+		case "Microsoft.Authorization/roleAssignments":
+			foundRoleAssignment = true
+			if resource.Scope != "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]" {
+				t.Fatalf("Expected the role assignment scope to be the build Key Vault, got %q", resource.Scope)
+			}
+			if resource.Name == "" || !strings.Contains(resource.Name, "guid(") {
+				t.Fatalf("Expected a deterministic Key Vault role assignment name, got %q", resource.Name)
+			}
+			var principalID string
+			if err := json.Unmarshal(resource.Properties["principalId"], &principalID); err != nil || principalID != "[parameters('objectId')]" {
+				t.Fatalf("Expected the role assignment principal to use objectId, got %q (%v)", principalID, err)
+			}
+			var roleDefinitionID string
+			if err := json.Unmarshal(resource.Properties["roleDefinitionId"], &roleDefinitionID); err != nil || !strings.Contains(roleDefinitionID, keyVaultSecretsOfficerRoleDefinitionID) {
+				t.Fatalf("Expected Key Vault Secrets Officer role definition, got %q (%v)", roleDefinitionID, err)
+			}
+		case "Microsoft.KeyVault/vaults/secrets":
+			foundSecret = true
+			if !containsString(resource.DependsOn, "[extensionResourceId(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('objectId'), 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'))]") {
+				t.Fatal("Expected the secret to depend on the Key Vault role assignment!")
+			}
 		}
-
-		var enabled bool
-		if err := json.Unmarshal(resource.Properties["enableRbacAuthorization"], &enabled); err != nil {
-			t.Fatalf("Expected RBAC Key Vault template to include enableRbacAuthorization: %v", err)
-		}
-		if !enabled {
-			t.Error("Expected RBAC Key Vault template to enable RBAC authorization!")
-		}
-		return
 	}
 
-	t.Error("Expected Key Vault resource in RBAC deployment template!")
+	if !foundKeyVault || !foundRoleAssignment || !foundSecret {
+		t.Fatalf("Expected Key Vault, role assignment, and secret resources; got KeyVault=%t RoleAssignment=%t Secret=%t", foundKeyVault, foundRoleAssignment, foundSecret)
+	}
+}
+
+func TestKeyVaultDeploymentWithRBACAuthorizationWithoutRoleAssignment(t *testing.T) {
+	config := getArmBuilderConfigurationWithWindows()
+	config["build_key_vault_enable_rbac_authorization"] = "true"
+	config["build_key_vault_assign_rbac_role"] = "false"
+
+	var c Config
+	_, err := c.Prepare(config, getPackerConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deployment, err := GetKeyVaultDeployment(context.Background(), &c, c.winrmCertificate, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := (*deployment.Properties.Parameters)["objectId"]; ok {
+		t.Fatal("Expected RBAC Key Vault deployment parameters to omit objectId when role assignment is disabled!")
+	}
+
+	templateJSON, err := json.Marshal(deployment.Properties.Template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(templateJSON), "Microsoft.Authorization/roleAssignments") {
+		t.Fatal("Expected RBAC Key Vault template to omit the role assignment when disabled!")
+	}
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // Ensure no licenseType is set when not specified in config

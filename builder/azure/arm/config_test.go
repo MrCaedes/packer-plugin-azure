@@ -62,6 +62,9 @@ func TestConfigShouldProvideReasonableDefaultValues(t *testing.T) {
 	if c.BuildKeyVaultEnableRBACAuthorization {
 		t.Error("Expected 'BuildKeyVaultEnableRBACAuthorization' to default to false!")
 	}
+	if c.BuildKeyVaultAssignRBACRole == nil || !*c.BuildKeyVaultAssignRBACRole {
+		t.Error("Expected 'BuildKeyVaultAssignRBACRole' to default to true!")
+	}
 
 	if c.BuildKeyVaultDeleteSecret {
 		t.Error("Expected 'BuildKeyVaultDeleteSecret' to default to false!")
@@ -83,10 +86,33 @@ func TestConfigShouldEnableBuildKeyVaultRBACAuthorization(t *testing.T) {
 	}
 }
 
+func TestConfigCanDisableBuildKeyVaultRBACRoleAssignment(t *testing.T) {
+	builderValues := getArmBuilderConfiguration()
+	builderValues["build_key_vault_enable_rbac_authorization"] = true
+	builderValues["build_key_vault_assign_rbac_role"] = false
+
+	var c Config
+	_, err := c.Prepare(builderValues, getPackerConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if c.BuildKeyVaultAssignRBACRole == nil || *c.BuildKeyVaultAssignRBACRole {
+		t.Error("Expected 'BuildKeyVaultAssignRBACRole' to be false!")
+	}
+}
+
 func TestConfigSpecIncludesBuildKeyVaultRBACAuthorization(t *testing.T) {
 	_, ok := (&Config{}).FlatMapstructure().HCL2Spec()["build_key_vault_enable_rbac_authorization"]
 	if !ok {
 		t.Error("Expected HCL2 spec to include 'build_key_vault_enable_rbac_authorization'!")
+	}
+}
+
+func TestConfigSpecIncludesBuildKeyVaultRBACRoleAssignment(t *testing.T) {
+	_, ok := (&Config{}).FlatMapstructure().HCL2Spec()["build_key_vault_assign_rbac_role"]
+	if !ok {
+		t.Error("Expected HCL2 spec to include 'build_key_vault_assign_rbac_role'!")
 	}
 }
 

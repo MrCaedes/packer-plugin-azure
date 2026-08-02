@@ -43,6 +43,7 @@ type Resource struct {
 	Resources  *[]Resource        `json:"resources,omitempty"`
 	Identity   *Identity          `json:"identity,omitempty"`
 	Condition  *string            `json:"condition,omitempty"`
+	Scope      *string            `json:"scope,omitempty"`
 }
 
 type Plan struct {
@@ -148,6 +149,8 @@ type Properties struct {
 	AutoUpgradeMinorVersion *bool                 `json:"autoUpgradeMinorVersion,omitempty"`
 	Settings                *CustomScriptSettings `json:"settings,omitempty"`
 	Attributes              *Attributes           `json:"attributes,omitempty"`
+	PrincipalId             *string               `json:"principalId,omitempty"`
+	RoleDefinitionId        *string               `json:"roleDefinitionId,omitempty"`
 }
 
 type CustomScriptSettings struct {

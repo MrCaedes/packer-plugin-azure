@@ -230,9 +230,20 @@
 - `build_key_vault_sku` (string) - Specify the KeyVault SKU to create during the build. Valid values are
   standard or premium. The default value is standard.
 
-- `build_key_vault_enable_rbac_authorization` (bool) - Enable Azure RBAC authorization for the temporary build Key Vault instead
-  of creating Key Vault access policies. This applies only when Packer
-  creates the build Key Vault and defaults to false.
+- `build_key_vault_enable_rbac_authorization` (bool) - Enable Azure RBAC authorization for the build Key Vault instead of creating
+  Key Vault access policies. For an existing Key Vault, the vault must already
+  use RBAC authorization; Packer does not change its authorization model.
+  Defaults to false.
+
+- `build_key_vault_assign_rbac_role` (\*bool) - When build_key_vault_enable_rbac_authorization is true, attempt to grant the
+  Packer build identity the Key Vault Secrets Officer role at the build Key
+  Vault scope. Defaults to true. Set this to false only when that identity
+  already has Key Vault Secrets Officer, or equivalent secret data actions,
+  at the vault scope or above. Assigning the role requires
+  Microsoft.Authorization/roleAssignments/write at the vault scope or above.
+  The data-plane role does not replace the Azure Resource Manager permissions
+  Packer already needs, including Microsoft.KeyVault/vaults/secrets/write when
+  it uploads a certificate to an existing Key Vault.
 
 - `skip_create_build_key_vault` (bool) - Skip creating the build key vault during Windows build.
   This is useful for cases when a subscription has policy restrictions on key vault resources.
