@@ -429,10 +429,12 @@ type Config struct {
 	// Specify an existing resource group to run the build in.
 	BuildResourceGroupName string `mapstructure:"build_resource_group_name"`
 	// Specify an existing key vault to use for uploading the certificate for the
-	// instance to connect. Before writing the certificate, Packer reads the vault
-	// and verifies that it is enabled for VM deployment and in the same location
-	// as the build VM. The Packer identity requires Microsoft.KeyVault/vaults/read
-	// at the vault scope or above.
+	// instance to connect. When build_key_vault_delete_secret or
+	// build_key_vault_enable_rbac_authorization is set, Packer first reads the
+	// vault and verifies that it is enabled for VM deployment and in the same
+	// location as the build VM; that preflight requires
+	// Microsoft.KeyVault/vaults/read at the vault scope or above. Without those
+	// options no vault read is performed and no new permission is required.
 	BuildKeyVaultName string `mapstructure:"build_key_vault_name"`
 	// Specify the secret name to use for the certificate created in the key vault.
 	// When build_key_vault_delete_secret is true, this is the prefix of a unique,
@@ -450,7 +452,9 @@ type Config struct {
 	// runner must be able to resolve and reach the vault data-plane endpoint, including
 	// through any private endpoint or firewall.
 	// Packer resolves the Key Vault endpoint before writing the secret; if it cannot, no secret is created.
-	// Packer reports a cleanup failure as a build error. Cleanup can be bypassed or the
+	// Packer reports a cleanup failure as a build error, even when the image was
+	// already captured; the image remains in Azure and the build log records its
+	// name and resource group, but no artifact is returned. Cleanup can be bypassed or the
 	// process can stop before deletion, leaving the secret for manual remediation.
 	// Defaults to false.
 	BuildKeyVaultDeleteSecret bool `mapstructure:"build_key_vault_delete_secret" required:"false"`
@@ -460,26 +464,35 @@ type Config struct {
 	// Enable Azure RBAC authorization for the build Key Vault instead of creating
 	// Key Vault access policies. For an existing Key Vault, the vault must already
 	// use RBAC authorization; Packer verifies this before writing the certificate
-	// and does not change its authorization model.
+	// and does not change its authorization model. For a Key Vault created by
+	// Packer, the vault is deployed with RBAC authorization and no data-plane
+	// role assignment: the certificate secret is written by the same ARM
+	// deployment and the build VM retrieves it through the vault's
+	// enabledForDeployment capability, so nothing in that flow uses the vault's
+	// data plane. Only supported for Windows builds and cannot be combined with
+	// skip_create_build_key_vault.
 	// Defaults to false.
 	BuildKeyVaultEnableRBACAuthorization bool `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false"`
-	// When build_key_vault_enable_rbac_authorization is true, attempt to grant the
-	// Packer build identity the Key Vault Secrets Officer role at the build Key
-	// Vault scope. Defaults to true. For an existing Key Vault, Packer only grants
-	// the role when build_key_vault_delete_secret is also true: the certificate
-	// upload goes through Azure Resource Manager and the build VM retrieves it
-	// through the vault's enabledForDeployment platform capability, so deleting
-	// the run-scoped secret during cleanup is the only operation that uses the
-	// vault's data plane; the assignment remains on the vault after the build.
-	// Set this to false only when that identity
-	// already has Key Vault Secrets Officer, or equivalent secret data actions,
-	// at the vault scope or above. Assigning the role requires
+	// When build_key_vault_enable_rbac_authorization and
+	// build_key_vault_delete_secret are both true for an existing build Key
+	// Vault, attempt to grant the Packer build identity the Key Vault Secrets
+	// Officer role at the build Key Vault scope. Defaults to true. Deleting the
+	// run-scoped secret during cleanup is the only operation that uses the
+	// vault's data plane: the certificate upload goes through Azure Resource
+	// Manager and the build VM retrieves it through the vault's
+	// enabledForDeployment platform capability. Key Vaults created by Packer
+	// never receive a role assignment, and setting this option without
+	// build_key_vault_enable_rbac_authorization fails config validation.
+	// The assignment remains on the vault after the build.
+	// Set this to false only when the identity already has Key Vault Secrets
+	// Officer, or a role with the Microsoft.KeyVault/vaults/secrets/delete data
+	// action, at the vault scope or above. Assigning the role requires
 	// Microsoft.Authorization/roleAssignments/write at the vault scope or above.
 	// The data-plane role does not replace the Azure Resource Manager permissions
 	// Packer already needs, including Microsoft.KeyVault/vaults/secrets/write when
 	// it uploads a certificate to an existing Key Vault. When Packer assigns the
-	// role to an existing vault and secret cleanup is enabled, it retries a 403
-	// data-plane deletion for up to two minutes while the role assignment propagates.
+	// role, it retries a 403 data-plane deletion for up to two minutes while the
+	// role assignment propagates.
 	BuildKeyVaultAssignRBACRole *bool `mapstructure:"build_key_vault_assign_rbac_role" required:"false"`
 
 	// Skip creating the build key vault during Windows build.
@@ -1243,10 +1256,6 @@ func provideDefaultValues(c *Config) {
 		c.BuildKeyVaultSecretName = DefaultSecretName
 	}
 
-	if c.BuildKeyVaultAssignRBACRole == nil {
-		c.BuildKeyVaultAssignRBACRole = azcommon.BoolPtr(true)
-	}
-
 	if c.SecurityType == constants.ConfidentialVM && c.SecurityEncryptionType == "" {
 		c.SecurityEncryptionType = string(virtualmachines.SecurityEncryptionTypesVMGuestStateOnly)
 	}
@@ -1455,6 +1464,15 @@ func assertRequiredParametersSet(c *Config, errs *packersdk.MultiError) {
 	}
 	if c.BuildKeyVaultDeleteSecret && !reKeyVaultSecretPrefix.MatchString(c.BuildKeyVaultSecretName) {
 		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("build_key_vault_secret_name must contain only alphanumeric characters or hyphens and be at most %d characters when build_key_vault_delete_secret is enabled", keyVaultSecretNamePrefixMaxLength))
+	}
+	if c.BuildKeyVaultEnableRBACAuthorization && c.SkipCreateBuildKeyVault {
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("build_key_vault_enable_rbac_authorization cannot be used with skip_create_build_key_vault"))
+	}
+	if c.BuildKeyVaultEnableRBACAuthorization && !strings.EqualFold(c.OSType, constants.Target_Windows) {
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("build_key_vault_enable_rbac_authorization is only supported for Windows builds"))
+	}
+	if c.BuildKeyVaultAssignRBACRole != nil && !c.BuildKeyVaultEnableRBACAuthorization {
+		errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("build_key_vault_assign_rbac_role requires build_key_vault_enable_rbac_authorization"))
 	}
 
 	/////////////////////////////////////////////

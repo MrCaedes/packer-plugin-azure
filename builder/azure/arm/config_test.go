@@ -62,8 +62,11 @@ func TestConfigShouldProvideReasonableDefaultValues(t *testing.T) {
 	if c.BuildKeyVaultEnableRBACAuthorization {
 		t.Error("Expected 'BuildKeyVaultEnableRBACAuthorization' to default to false!")
 	}
-	if c.BuildKeyVaultAssignRBACRole == nil || !*c.BuildKeyVaultAssignRBACRole {
-		t.Error("Expected 'BuildKeyVaultAssignRBACRole' to default to true!")
+	if c.BuildKeyVaultAssignRBACRole != nil {
+		t.Error("Expected 'BuildKeyVaultAssignRBACRole' to default to unset!")
+	}
+	if !c.shouldAssignBuildKeyVaultRBACRole() {
+		t.Error("Expected the default to assign the RBAC role when applicable!")
 	}
 
 	if c.BuildKeyVaultDeleteSecret {
@@ -72,8 +75,8 @@ func TestConfigShouldProvideReasonableDefaultValues(t *testing.T) {
 }
 
 func TestConfigShouldEnableBuildKeyVaultRBACAuthorization(t *testing.T) {
-	builderValues := getArmBuilderConfiguration()
-	builderValues["build_key_vault_enable_rbac_authorization"] = true
+	builderValues := getArmBuilderConfigurationWithWindows()
+	builderValues["build_key_vault_enable_rbac_authorization"] = "true"
 
 	var c Config
 	_, err := c.Prepare(builderValues, getPackerConfiguration())
@@ -87,9 +90,9 @@ func TestConfigShouldEnableBuildKeyVaultRBACAuthorization(t *testing.T) {
 }
 
 func TestConfigCanDisableBuildKeyVaultRBACRoleAssignment(t *testing.T) {
-	builderValues := getArmBuilderConfiguration()
-	builderValues["build_key_vault_enable_rbac_authorization"] = true
-	builderValues["build_key_vault_assign_rbac_role"] = false
+	builderValues := getArmBuilderConfigurationWithWindows()
+	builderValues["build_key_vault_enable_rbac_authorization"] = "true"
+	builderValues["build_key_vault_assign_rbac_role"] = "false"
 
 	var c Config
 	_, err := c.Prepare(builderValues, getPackerConfiguration())
@@ -99,6 +102,54 @@ func TestConfigCanDisableBuildKeyVaultRBACRoleAssignment(t *testing.T) {
 
 	if c.BuildKeyVaultAssignRBACRole == nil || *c.BuildKeyVaultAssignRBACRole {
 		t.Error("Expected 'BuildKeyVaultAssignRBACRole' to be false!")
+	}
+}
+
+func TestConfigRejectsRBACAuthorizationOnUnsupportedPaths(t *testing.T) {
+	testCases := []struct {
+		name     string
+		mutate   func(map[string]interface{})
+		expected string
+	}{
+		{
+			name: "Linux build",
+			mutate: func(m map[string]interface{}) {
+				m["build_key_vault_enable_rbac_authorization"] = true
+			},
+			expected: "only supported for Windows builds",
+		},
+		{
+			name: "assign role without RBAC authorization",
+			mutate: func(m map[string]interface{}) {
+				m["build_key_vault_assign_rbac_role"] = true
+			},
+			expected: "requires build_key_vault_enable_rbac_authorization",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			builderValues := getArmBuilderConfiguration()
+			testCase.mutate(builderValues)
+
+			var c Config
+			_, err := c.Prepare(builderValues, getPackerConfiguration())
+			if err == nil || !strings.Contains(err.Error(), testCase.expected) {
+				t.Fatalf("Expected an error containing %q, got %v", testCase.expected, err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsRBACAuthorizationWithSkipCreateBuildKeyVault(t *testing.T) {
+	builderValues := getArmBuilderConfigurationWithWindows()
+	builderValues["build_key_vault_enable_rbac_authorization"] = "true"
+	builderValues["skip_create_build_key_vault"] = "true"
+
+	var c Config
+	_, err := c.Prepare(builderValues, getPackerConfiguration())
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with skip_create_build_key_vault") {
+		t.Fatalf("Expected a skip_create_build_key_vault conflict error, got %v", err)
 	}
 }
 
@@ -179,6 +230,17 @@ func TestConfigRejectsInvalidBuildKeyVaultSecretDeletion(t *testing.T) {
 				values["build_key_vault_name"] = "test-key-vault"
 				values["build_resource_group_name"] = "test-key-vault-rg"
 				values["build_key_vault_secret_name"] = strings.Repeat("a", keyVaultSecretNamePrefixMaxLength+1)
+				values["build_key_vault_delete_secret"] = "true"
+			},
+			expected: "build_key_vault_secret_name must contain only alphanumeric characters or hyphens",
+		},
+		{
+			name: "secret name prefix has invalid characters",
+			configure: func(values map[string]string) {
+				delete(values, "location")
+				values["build_key_vault_name"] = "test-key-vault"
+				values["build_resource_group_name"] = "test-key-vault-rg"
+				values["build_key_vault_secret_name"] = "packer_secret"
 				values["build_key_vault_delete_secret"] = "true"
 			},
 			expected: "build_key_vault_secret_name must contain only alphanumeric characters or hyphens",
