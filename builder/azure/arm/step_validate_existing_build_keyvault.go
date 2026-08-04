@@ -46,11 +46,16 @@ func (s *StepValidateExistingBuildKeyVault) getExistingBuildKeyVault(ctx context
 	return result.Model, nil
 }
 
+func (s *StepValidateExistingBuildKeyVault) halt(state multistep.StateBag, err error) multistep.StepAction {
+	state.Put(constants.Error, err)
+	s.error(err)
+	return multistep.ActionHalt
+}
+
 func (s *StepValidateExistingBuildKeyVault) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	isExistingKeyVault, ok := state.GetOk(constants.ArmIsExistingKeyVault)
 	if !ok || !isExistingKeyVault.(bool) {
-		s.error(fmt.Errorf("refusing to validate build Key Vault because it is not marked as existing"))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("refusing to validate build Key Vault because it is not marked as existing"))
 	}
 
 	keyVaultName := state.Get(constants.ArmKeyVaultName).(string)
@@ -68,39 +73,36 @@ func (s *StepValidateExistingBuildKeyVault) Run(ctx context.Context, state multi
 	s.say("Validating the existing build Key Vault...")
 	vault, err := s.getVault(lookupContext, subscriptionID, resourceGroupName, keyVaultName)
 	if err != nil {
-		s.error(fmt.Errorf("failed to read existing build Key Vault %q in resource group %q: %w. The Packer identity requires Microsoft.KeyVault/vaults/read at the vault scope or above", keyVaultName, resourceGroupName, err))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("failed to read existing build Key Vault %q in resource group %q: %w. Verify the vault name, resource group, and subscription are correct, and that the Packer identity has Microsoft.KeyVault/vaults/read at the vault scope or above", keyVaultName, resourceGroupName, err))
 	}
 	if vault == nil {
-		s.error(fmt.Errorf("Azure did not return the existing build Key Vault %q in resource group %q", keyVaultName, resourceGroupName))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("Azure did not return the existing build Key Vault %q in resource group %q", keyVaultName, resourceGroupName))
 	}
 	if vault.Properties.EnabledForDeployment == nil || !*vault.Properties.EnabledForDeployment {
-		s.error(fmt.Errorf("existing build Key Vault %q must have enabledForDeployment=true so the build VM can retrieve its certificate", keyVaultName))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("existing build Key Vault %q must have enabledForDeployment=true so the build VM can retrieve its certificate", keyVaultName))
 	}
 	if vault.Location == nil || normalizeAzureRegion(*vault.Location) != normalizeAzureRegion(buildLocation) {
 		vaultLocation := ""
 		if vault.Location != nil {
 			vaultLocation = *vault.Location
 		}
-		s.error(fmt.Errorf("existing build Key Vault %q is in location %q but the build VM is in %q; Azure requires them to use the same location", keyVaultName, vaultLocation, buildLocation))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("existing build Key Vault %q is in location %q but the build VM is in %q; Azure requires them to use the same location", keyVaultName, vaultLocation, buildLocation))
 	}
 	if s.config.BuildKeyVaultEnableRBACAuthorization && (vault.Properties.EnableRbacAuthorization == nil || !*vault.Properties.EnableRbacAuthorization) {
-		s.error(fmt.Errorf("build_key_vault_enable_rbac_authorization is true but existing build Key Vault %q does not use RBAC authorization. Packer will not change an existing vault's authorization model because doing so invalidates its access policies", keyVaultName))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("build_key_vault_enable_rbac_authorization is true but existing build Key Vault %q does not use RBAC authorization. Packer will not change an existing vault's authorization model because doing so invalidates its access policies", keyVaultName))
+	}
+	if !s.config.BuildKeyVaultEnableRBACAuthorization && s.config.BuildKeyVaultDeleteSecret &&
+		vault.Properties.EnableRbacAuthorization != nil && *vault.Properties.EnableRbacAuthorization {
+		s.say(fmt.Sprintf("Warning: existing build Key Vault %q uses RBAC authorization but build_key_vault_enable_rbac_authorization is false. Certificate secret cleanup will fail with a 403 unless the Packer identity holds a data-plane role with the Microsoft.KeyVault/vaults/secrets/delete action on the vault", keyVaultName))
 	}
 
 	if s.config.BuildKeyVaultDeleteSecret {
 		if vault.Properties.VaultUri == nil {
-			s.error(fmt.Errorf("Azure did not return a data-plane URI for existing build Key Vault %q", keyVaultName))
-			return multistep.ActionHalt
+			return s.halt(state, fmt.Errorf("Azure did not return a data-plane URI for existing build Key Vault %q", keyVaultName))
 		}
 		endpoint, err := keyVaultEndpointFromURI(*vault.Properties.VaultUri)
 		if err != nil {
-			s.error(fmt.Errorf("existing build Key Vault %q has an invalid data-plane URI: %w", keyVaultName, err))
-			return multistep.ActionHalt
+			return s.halt(state, fmt.Errorf("existing build Key Vault %q has an invalid data-plane URI: %w", keyVaultName, err))
 		}
 		state.Put(constants.ArmKeyVaultDataPlaneEndpoint, endpoint)
 	}

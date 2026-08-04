@@ -256,9 +256,14 @@ func TestExistingBuildKeyVaultPreflightStepsOrder(t *testing.T) {
 			expected: []string{"validate"},
 		},
 		{
-			name:     "legacy access policy vault",
-			config:   &Config{},
+			name:     "secret cleanup alone still validates the vault",
+			config:   &Config{BuildKeyVaultDeleteSecret: true},
 			expected: []string{"validate"},
+		},
+		{
+			name:     "legacy access policy vault runs no preflight",
+			config:   &Config{},
+			expected: nil,
 		},
 	}
 
@@ -281,5 +286,66 @@ func TestExistingBuildKeyVaultPreflightStepsOrder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStepValidateExistingBuildKeyVaultWarnsWhenVaultUsesRBACWithoutFlag(t *testing.T) {
+	state := newExistingBuildKeyVaultValidationState()
+	rbacEnabled := true
+	vault := validExistingBuildKeyVault()
+	vault.Properties.EnableRbacAuthorization = &rbacEnabled
+
+	var messages []string
+	step := &StepValidateExistingBuildKeyVault{
+		config: &Config{BuildKeyVaultDeleteSecret: true},
+		client: &AzureClient{PollingDuration: time.Minute},
+		say: func(message string) {
+			messages = append(messages, message)
+		},
+		error: func(error) {},
+		getVault: func(context.Context, string, string, string) (*vaults.Vault, error) {
+			return vault, nil
+		},
+	}
+
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
+		t.Fatalf("Expected the mismatch to be a warning, not a halt, got %v", action)
+	}
+
+	warned := false
+	for _, message := range messages {
+		if strings.Contains(message, "uses RBAC authorization but build_key_vault_enable_rbac_authorization is false") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("Expected a warning about the RBAC authorization mismatch, got %v", messages)
+	}
+	if _, ok := state.GetOk(constants.Error); ok {
+		t.Fatalf("Expected the warning not to set stateBag[%q]", constants.Error)
+	}
+}
+
+func TestStepValidateExistingBuildKeyVaultHaltPutsBuildError(t *testing.T) {
+	state := newExistingBuildKeyVaultValidationState()
+	step := &StepValidateExistingBuildKeyVault{
+		config: &Config{BuildKeyVaultEnableRBACAuthorization: true},
+		client: &AzureClient{PollingDuration: time.Minute},
+		say:    func(string) {},
+		error:  func(error) {},
+		getVault: func(context.Context, string, string, string) (*vaults.Vault, error) {
+			return validExistingBuildKeyVault(), nil
+		},
+	}
+
+	if action := step.Run(context.Background(), state); action != multistep.ActionHalt {
+		t.Fatalf("Expected a non-RBAC vault to halt an RBAC build, got %v", action)
+	}
+	rawErr, ok := state.GetOk(constants.Error)
+	if !ok {
+		t.Fatalf("Expected the halt to set stateBag[%q]", constants.Error)
+	}
+	if err, isError := rawErr.(error); !isError || !strings.Contains(err.Error(), "does not use RBAC authorization") {
+		t.Fatalf("Expected the RBAC mismatch error in the state bag, got %v", rawErr)
 	}
 }

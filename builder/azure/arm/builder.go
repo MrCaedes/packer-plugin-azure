@@ -49,6 +49,11 @@ const (
 )
 
 func existingBuildKeyVaultPreflightSteps(client *AzureClient, ui packersdk.Ui, config *Config) []multistep.Step {
+	// Legacy existing-vault configurations that use neither of the new flags keep
+	// their pre-existing permission surface: no vault read, no preflight.
+	if !config.BuildKeyVaultDeleteSecret && !config.BuildKeyVaultEnableRBACAuthorization {
+		return nil
+	}
 	steps := []multistep.Step{NewStepValidateExistingBuildKeyVault(client, ui, config)}
 	if config.BuildKeyVaultEnableRBACAuthorization && config.BuildKeyVaultDeleteSecret && config.shouldAssignBuildKeyVaultRBACRole() {
 		steps = append(steps, NewStepEnsureKeyVaultRBACRole(client, ui, config))
@@ -428,8 +433,11 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	case constants.Target_Windows:
 		steps = []multistep.Step{
 			NewStepGetSourceImageName(azureClient, ui, &b.config, generatedData),
-			NewStepCreateResourceGroup(azureClient, ui),
 		}
+		if !b.config.SkipCreateBuildKeyVault && b.config.BuildKeyVaultName != "" {
+			steps = append(steps, existingBuildKeyVaultPreflightSteps(azureClient, ui, &b.config)...)
+		}
+		steps = append(steps, NewStepCreateResourceGroup(azureClient, ui))
 
 		if b.config.SkipCreateBuildKeyVault {
 			ui.Say("Skipping build keyvault creation...")
@@ -440,8 +448,6 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 				NewStepDeployTemplate(azureClient, ui, &b.config, keyVaultDeploymentName, GetCommunicatorSpecificKeyVaultDeployment, KeyVaultTemplate),
 			)
 		} else {
-			steps = append(steps, existingBuildKeyVaultPreflightSteps(azureClient, ui, &b.config)...)
-
 			if b.config.Comm.Type == "winrm" {
 				steps = append(steps, NewStepCertificateInKeyVault(azureClient, ui, &b.config, b.config.winrmCertificate, b.config.WinrmExpirationTime))
 			} else {
