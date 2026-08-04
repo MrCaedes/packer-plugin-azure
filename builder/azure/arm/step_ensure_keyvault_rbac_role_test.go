@@ -271,3 +271,46 @@ func TestStepEnsureKeyVaultRBACRoleCreateRoleAssignmentRequiresConfiguredClient(
 		t.Fatalf("Expected an actionable unconfigured-client error, got %v", err)
 	}
 }
+
+func TestStepEnsureKeyVaultRBACRoleRunBoundsRoleAssignmentContext(t *testing.T) {
+	// The multistep runner context has no deadline, and the go-azure-sdk
+	// resource manager client rejects deadline-less contexts before sending any
+	// request. Run must therefore bound the context itself; this test drives Run
+	// through the real createRoleAssignment path to pin that behaviour.
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut {
+			t.Errorf("Expected PUT request, got %q", request.Method)
+		}
+		requests++
+		responseWriter.Header().Set("Content-Type", "application/json")
+		responseWriter.WriteHeader(http.StatusCreated)
+		_, _ = responseWriter.Write([]byte(`{"properties":{}}`))
+	}))
+	defer server.Close()
+
+	roleAssignmentsClient, err := roleassignments.NewRoleAssignmentsClientWithBaseURI(sdkEnvironments.ResourceManagerAPI(server.URL))
+	if err != nil {
+		t.Fatalf("Creating test role assignments client: %v", err)
+	}
+	roleAssignmentsClient.Client.Transport = server.Client().Transport
+	roleAssignmentsClient.Client.AuthorizeRequest = nil
+	step := &StepEnsureKeyVaultRBACRole{
+		config: &Config{
+			resolvedBuildPrincipalID: "00000000-0000-0000-0000-000000000002",
+		},
+		client: &AzureClient{
+			RoleAssignmentsClient: *roleAssignmentsClient,
+		},
+		say:   func(string) {},
+		error: func(error) {},
+	}
+	step.create = step.createRoleAssignment
+
+	if action := step.Run(context.Background(), newEnsureKeyVaultRBACRoleState()); action != multistep.ActionContinue {
+		t.Fatalf("Expected the role assignment step to continue with an undeadlined runner context, got %v", action)
+	}
+	if requests != 1 {
+		t.Fatalf("Expected exactly one role assignment request, got %d", requests)
+	}
+}

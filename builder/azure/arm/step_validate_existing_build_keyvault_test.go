@@ -242,12 +242,17 @@ func TestExistingBuildKeyVaultPreflightStepsOrder(t *testing.T) {
 	}{
 		{
 			name:     "RBAC with assignment",
-			config:   &Config{BuildKeyVaultEnableRBACAuthorization: true},
+			config:   &Config{BuildKeyVaultEnableRBACAuthorization: true, BuildKeyVaultDeleteSecret: true},
 			expected: []string{"validate", "assign"},
 		},
 		{
 			name:     "RBAC without assignment",
-			config:   &Config{BuildKeyVaultEnableRBACAuthorization: true, BuildKeyVaultAssignRBACRole: &assignRole},
+			config:   &Config{BuildKeyVaultEnableRBACAuthorization: true, BuildKeyVaultDeleteSecret: true, BuildKeyVaultAssignRBACRole: &assignRole},
+			expected: []string{"validate"},
+		},
+		{
+			name:     "RBAC without secret cleanup needs no data-plane role",
+			config:   &Config{BuildKeyVaultEnableRBACAuthorization: true},
 			expected: []string{"validate"},
 		},
 		{

@@ -50,7 +50,7 @@ const (
 
 func existingBuildKeyVaultPreflightSteps(client *AzureClient, ui packersdk.Ui, config *Config) []multistep.Step {
 	steps := []multistep.Step{NewStepValidateExistingBuildKeyVault(client, ui, config)}
-	if config.BuildKeyVaultEnableRBACAuthorization && config.shouldAssignBuildKeyVaultRBACRole() {
+	if config.BuildKeyVaultEnableRBACAuthorization && config.BuildKeyVaultDeleteSecret && config.shouldAssignBuildKeyVaultRBACRole() {
 		steps = append(steps, NewStepEnsureKeyVaultRBACRole(client, ui, config))
 	}
 	return steps

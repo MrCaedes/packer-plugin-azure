@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/authorization/2022-04-01/roleassignments"
@@ -89,8 +90,15 @@ func (s *StepEnsureKeyVaultRBACRole) Run(ctx context.Context, state multistep.St
 		},
 	}
 
+	assignmentTimeout := 15 * time.Minute
+	if s.client != nil && s.client.PollingDuration > 0 {
+		assignmentTimeout = s.client.PollingDuration
+	}
+	assignmentContext, cancel := context.WithTimeout(ctx, assignmentTimeout)
+	defer cancel()
+
 	s.say("Ensuring Key Vault Secrets Officer role assignment on the existing build Key Vault...")
-	if err := s.create(ctx, roleAssignmentID, input); err != nil {
+	if err := s.create(assignmentContext, roleAssignmentID, input); err != nil {
 		s.error(fmt.Errorf("failed to grant Key Vault Secrets Officer to the Packer build identity: %w. Set build_key_vault_assign_rbac_role=false only after granting Key Vault Secrets Officer, or equivalent secret data actions, at the vault scope or above; Packer also needs Microsoft.KeyVault/vaults/secrets/write to upload the certificate", err))
 		return multistep.ActionHalt
 	}

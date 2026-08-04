@@ -465,7 +465,13 @@ type Config struct {
 	BuildKeyVaultEnableRBACAuthorization bool `mapstructure:"build_key_vault_enable_rbac_authorization" required:"false"`
 	// When build_key_vault_enable_rbac_authorization is true, attempt to grant the
 	// Packer build identity the Key Vault Secrets Officer role at the build Key
-	// Vault scope. Defaults to true. Set this to false only when that identity
+	// Vault scope. Defaults to true. For an existing Key Vault, Packer only grants
+	// the role when build_key_vault_delete_secret is also true: the certificate
+	// upload goes through Azure Resource Manager and the build VM retrieves it
+	// through the vault's enabledForDeployment platform capability, so deleting
+	// the run-scoped secret during cleanup is the only operation that uses the
+	// vault's data plane; the assignment remains on the vault after the build.
+	// Set this to false only when that identity
 	// already has Key Vault Secrets Officer, or equivalent secret data actions,
 	// at the vault scope or above. Assigning the role requires
 	// Microsoft.Authorization/roleAssignments/write at the vault scope or above.
