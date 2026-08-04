@@ -97,6 +97,7 @@ func TestStepCertificateInKeyVaultCleanupDoesNotDeleteWithoutOptIn(t *testing.T)
 
 func TestStepCertificateInKeyVaultCleanupDeletesWrittenSecret(t *testing.T) {
 	state := newCertificateInKeyVaultState()
+	state.Put(constants.ArmKeyVaultDataPlaneEndpoint, "https://test-key-vault.vault.azure.net")
 	var actualSecretURI string
 	var actualSecretName string
 	step := &StepCertificateInKeyVault{
@@ -109,9 +110,6 @@ func TestStepCertificateInKeyVaultCleanupDeletesWrittenSecret(t *testing.T) {
 		error: func(error) {},
 		set: func(context.Context, secrets.SecretId) error {
 			return nil
-		},
-		getVaultURI: func(context.Context, string, string, string) (string, error) {
-			return "https://test-key-vault.vault.azure.net/", nil
 		},
 		deleteSecret: func(_ context.Context, secretURI, secretName string) error {
 			actualSecretURI = secretURI
@@ -297,6 +295,7 @@ func TestWaitForKeyVaultRBACRolePropagationCompletesAfterDelay(t *testing.T) {
 
 func TestStepCertificateInKeyVaultCleanupDeletesAfterFailedWrite(t *testing.T) {
 	state := newCertificateInKeyVaultState()
+	state.Put(constants.ArmKeyVaultDataPlaneEndpoint, "https://test-key-vault.vault.azure.net")
 	var actualSecretURI string
 	var actualSecretName string
 	step := &StepCertificateInKeyVault{
@@ -309,15 +308,6 @@ func TestStepCertificateInKeyVaultCleanupDeletesAfterFailedWrite(t *testing.T) {
 		error: func(error) {},
 		set: func(context.Context, secrets.SecretId) error {
 			return fmt.Errorf("set failed")
-		},
-		getVaultURI: func(ctx context.Context, subscriptionID, resourceGroupName, keyVaultName string) (string, error) {
-			if _, ok := ctx.Deadline(); !ok {
-				t.Fatal("Expected Key Vault URI lookup context to have a deadline")
-			}
-			if subscriptionID != "testSubscription" || resourceGroupName != "testResourceGroupName" || keyVaultName != "testKeyVaultName" {
-				t.Fatalf("Unexpected Key Vault lookup target: %q/%q/%q", subscriptionID, resourceGroupName, keyVaultName)
-			}
-			return "https://test-key-vault.vault.azure.net/", nil
 		},
 		deleteSecret: func(_ context.Context, secretURI, secretName string) error {
 			actualSecretURI = secretURI
@@ -366,6 +356,7 @@ func TestStepCertificateInKeyVaultCleanupDoesNotDeleteFromPackerOwnedVault(t *te
 
 func TestStepCertificateInKeyVaultCleanupReportsDeletionFailure(t *testing.T) {
 	state := newCertificateInKeyVaultState()
+	state.Put(constants.ArmKeyVaultDataPlaneEndpoint, "https://test-key-vault.vault.azure.net")
 	var errors []string
 	step := &StepCertificateInKeyVault{
 		config: &Config{
@@ -379,9 +370,6 @@ func TestStepCertificateInKeyVaultCleanupReportsDeletionFailure(t *testing.T) {
 		},
 		set: func(context.Context, secrets.SecretId) error {
 			return nil
-		},
-		getVaultURI: func(context.Context, string, string, string) (string, error) {
-			return "https://test-key-vault.vault.azure.net/", nil
 		},
 		deleteSecret: func(context.Context, string, string) error {
 			return fmt.Errorf("delete failed")
@@ -400,46 +388,9 @@ func TestStepCertificateInKeyVaultCleanupReportsDeletionFailure(t *testing.T) {
 	}
 }
 
-func TestStepCertificateInKeyVaultCleanupUsesPreResolvedVaultURIWhenWriteHasNoSecretURI(t *testing.T) {
-	state := newCertificateInKeyVaultState()
-	var actualSecretURI string
-	step := &StepCertificateInKeyVault{
-		config: &Config{
-			BuildKeyVaultName:         "testKeyVaultName",
-			BuildKeyVaultDeleteSecret: true,
-			tmpKeyVaultSecretName:     "testKeyVaultSecretName",
-		},
-		say:   func(string) {},
-		error: func(error) {},
-		set: func(context.Context, secrets.SecretId) error {
-			return nil
-		},
-		getVaultURI: func(context.Context, string, string, string) (string, error) {
-			return "https://test-key-vault.vault.azure.net/", nil
-		},
-		deleteSecret: func(_ context.Context, secretURI, _ string) error {
-			actualSecretURI = secretURI
-			return nil
-		},
-	}
-
-	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
-		t.Fatalf("Expected certificate step to succeed, got %v", action)
-	}
-	step.Cleanup(state)
-
-	if actualSecretURI != "https://test-key-vault.vault.azure.net" {
-		t.Fatalf("Expected cleanup to use the resolved Key Vault URI, got %q", actualSecretURI)
-	}
-	if _, ok := state.GetOk(constants.Error); ok {
-		t.Fatalf("Expected successful URI resolution not to set stateBag[%q]", constants.Error)
-	}
-}
-
 func TestStepCertificateInKeyVaultUsesPreflightEndpointForSecretCleanup(t *testing.T) {
 	state := newCertificateInKeyVaultState()
 	state.Put(constants.ArmKeyVaultDataPlaneEndpoint, "https://test-key-vault.vault.azure.net")
-	lookupCalls := 0
 	step := &StepCertificateInKeyVault{
 		config: &Config{
 			BuildKeyVaultName:         "testKeyVaultName",
@@ -450,10 +401,6 @@ func TestStepCertificateInKeyVaultUsesPreflightEndpointForSecretCleanup(t *testi
 		error: func(error) {},
 		set: func(context.Context, secrets.SecretId) error {
 			return nil
-		},
-		getVaultURI: func(context.Context, string, string, string) (string, error) {
-			lookupCalls++
-			return "", fmt.Errorf("preflight endpoint should have been used")
 		},
 		deleteSecret: func(_ context.Context, endpoint, _ string) error {
 			if endpoint != "https://test-key-vault.vault.azure.net" {
@@ -466,13 +413,13 @@ func TestStepCertificateInKeyVaultUsesPreflightEndpointForSecretCleanup(t *testi
 	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("Expected certificate step to succeed with preflight endpoint, got %v", action)
 	}
-	if lookupCalls != 0 {
-		t.Fatalf("Expected no Key Vault endpoint lookup after preflight, got %d calls", lookupCalls)
-	}
 	step.Cleanup(state)
+	if _, ok := state.GetOk(constants.Error); ok {
+		t.Fatalf("Expected successful cleanup not to set stateBag[%q]", constants.Error)
+	}
 }
 
-func TestStepCertificateInKeyVaultRunStopsBeforeWriteWhenVaultURILookupFails(t *testing.T) {
+func TestStepCertificateInKeyVaultRunStopsBeforeWriteWhenPreflightEndpointMissing(t *testing.T) {
 	state := newCertificateInKeyVaultState()
 	deleteCalls := 0
 	setCalls := 0
@@ -491,9 +438,6 @@ func TestStepCertificateInKeyVaultRunStopsBeforeWriteWhenVaultURILookupFails(t *
 			setCalls++
 			return nil
 		},
-		getVaultURI: func(context.Context, string, string, string) (string, error) {
-			return "", fmt.Errorf("lookup failed")
-		},
 		deleteSecret: func(context.Context, string, string) error {
 			deleteCalls++
 			return nil
@@ -506,13 +450,16 @@ func TestStepCertificateInKeyVaultRunStopsBeforeWriteWhenVaultURILookupFails(t *
 	step.Cleanup(state)
 
 	if setCalls != 0 {
-		t.Fatalf("Expected no certificate write after a Key Vault URI lookup failure, got %d calls", setCalls)
+		t.Fatalf("Expected no certificate write without the preflight endpoint, got %d calls", setCalls)
 	}
 	if deleteCalls != 0 {
-		t.Fatalf("Expected no delete after a Key Vault URI lookup failure, got %d calls", deleteCalls)
+		t.Fatalf("Expected no delete without the preflight endpoint, got %d calls", deleteCalls)
 	}
-	if len(errors) != 1 || !strings.Contains(errors[0], "before creating") {
-		t.Fatalf("Expected a pre-write endpoint resolution error, got %v", errors)
+	if len(errors) != 1 || !strings.Contains(errors[0], "missing from the build state") {
+		t.Fatalf("Expected a missing-endpoint error, got %v", errors)
+	}
+	if _, ok := state.GetOk(constants.Error); !ok {
+		t.Fatalf("Expected the halt to set stateBag[%q]", constants.Error)
 	}
 }
 
@@ -615,5 +562,47 @@ func TestKeyVaultEndpointFromURI(t *testing.T) {
 
 	if _, err := keyVaultEndpointFromURI("http://test-key-vault.vault.azure.net/secrets/testKeyVaultSecretName"); err == nil {
 		t.Fatal("Expected non-HTTPS Key Vault URI to be rejected")
+	}
+}
+
+func TestIsKeyVaultRBACRolePropagationErrorClassification(t *testing.T) {
+	testCases := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "generic 403 is treated as propagation delay",
+			err:      &keyVaultSecretDeleteError{statusCode: 403, err: fmt.Errorf("deleting Key Vault secret: Forbidden: caller is not authorized (ForbiddenByRbac)")},
+			expected: true,
+		},
+		{
+			name:     "vault firewall denial is not retried",
+			err:      &keyVaultSecretDeleteError{statusCode: 403, err: fmt.Errorf("deleting Key Vault secret: Forbidden: client address is not authorized (ForbiddenByConnection)")},
+			expected: false,
+		},
+		{
+			name:     "policy denial is not retried",
+			err:      &keyVaultSecretDeleteError{statusCode: 403, err: fmt.Errorf("deleting Key Vault secret: Forbidden (ForbiddenByPolicy)")},
+			expected: false,
+		},
+		{
+			name:     "non-403 is not retried",
+			err:      &keyVaultSecretDeleteError{statusCode: 500, err: fmt.Errorf("deleting Key Vault secret: boom")},
+			expected: false,
+		},
+		{
+			name:     "untyped error is not retried",
+			err:      fmt.Errorf("deleting Key Vault secret: Forbidden"),
+			expected: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual := isKeyVaultRBACRolePropagationError(testCase.err); actual != testCase.expected {
+				t.Fatalf("Expected %v, got %v", testCase.expected, actual)
+			}
+		})
 	}
 }

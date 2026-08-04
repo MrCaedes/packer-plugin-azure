@@ -314,3 +314,90 @@ func TestStepEnsureKeyVaultRBACRoleRunBoundsRoleAssignmentContext(t *testing.T) 
 		t.Fatalf("Expected exactly one role assignment request, got %d", requests)
 	}
 }
+
+func TestStepEnsureKeyVaultRBACRoleRetriesPrincipalNotFound(t *testing.T) {
+	createCalls := 0
+	waitCalls := 0
+	step := &StepEnsureKeyVaultRBACRole{
+		config: &Config{
+			resolvedBuildPrincipalID: "00000000-0000-0000-0000-000000000002",
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		create: func(context.Context, roleassignments.ScopedRoleAssignmentId, roleassignments.RoleAssignmentCreateParameters) error {
+			createCalls++
+			if createCalls < 3 {
+				return fmt.Errorf(`unexpected status 400 (400 Bad Request) with error: PrincipalNotFound: Principal does not exist in the directory`)
+			}
+			return nil
+		},
+		wait: func(context.Context, time.Duration) bool {
+			waitCalls++
+			return true
+		},
+	}
+
+	if action := step.Run(context.Background(), newEnsureKeyVaultRBACRoleState()); action != multistep.ActionContinue {
+		t.Fatalf("Expected the role assignment to succeed after replication retries, got %v", action)
+	}
+	if createCalls != 3 || waitCalls != 2 {
+		t.Fatalf("Expected 3 create attempts with 2 waits, got %d/%d", createCalls, waitCalls)
+	}
+}
+
+func TestStepEnsureKeyVaultRBACRoleBoundsPrincipalNotFoundRetriesAndPutsBuildError(t *testing.T) {
+	state := newEnsureKeyVaultRBACRoleState()
+	createCalls := 0
+	step := &StepEnsureKeyVaultRBACRole{
+		config: &Config{
+			resolvedBuildPrincipalID: "00000000-0000-0000-0000-000000000002",
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		create: func(context.Context, roleassignments.ScopedRoleAssignmentId, roleassignments.RoleAssignmentCreateParameters) error {
+			createCalls++
+			return fmt.Errorf("PrincipalNotFound: Principal does not exist in the directory")
+		},
+		wait: func(context.Context, time.Duration) bool { return true },
+	}
+
+	if action := step.Run(context.Background(), state); action != multistep.ActionHalt {
+		t.Fatalf("Expected a persistent PrincipalNotFound to halt, got %v", action)
+	}
+	if createCalls != keyVaultRBACRolePropagationMaxRetries+1 {
+		t.Fatalf("Expected %d bounded create attempts, got %d", keyVaultRBACRolePropagationMaxRetries+1, createCalls)
+	}
+	rawErr, ok := state.GetOk(constants.Error)
+	if !ok {
+		t.Fatalf("Expected the halt to set stateBag[%q]", constants.Error)
+	}
+	if err, isError := rawErr.(error); !isError || !strings.Contains(err.Error(), "failed to grant Key Vault Secrets Officer") {
+		t.Fatalf("Expected the grant failure in the state bag, got %v", rawErr)
+	}
+}
+
+func TestStepEnsureKeyVaultRBACRoleDoesNotRetryNonReplicationFailures(t *testing.T) {
+	createCalls := 0
+	step := &StepEnsureKeyVaultRBACRole{
+		config: &Config{
+			resolvedBuildPrincipalID: "00000000-0000-0000-0000-000000000002",
+		},
+		say:   func(string) {},
+		error: func(error) {},
+		create: func(context.Context, roleassignments.ScopedRoleAssignmentId, roleassignments.RoleAssignmentCreateParameters) error {
+			createCalls++
+			return fmt.Errorf("AuthorizationFailed: The client does not have authorization")
+		},
+		wait: func(context.Context, time.Duration) bool {
+			t.Fatal("Expected no replication wait for a non-replication failure")
+			return true
+		},
+	}
+
+	if action := step.Run(context.Background(), newEnsureKeyVaultRBACRoleState()); action != multistep.ActionHalt {
+		t.Fatalf("Expected an authorization failure to halt immediately, got %v", action)
+	}
+	if createCalls != 1 {
+		t.Fatalf("Expected a single create attempt, got %d", createCalls)
+	}
+}

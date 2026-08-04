@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
-	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/keyvault/2023-07-01/secrets"
 	sdkclient "github.com/hashicorp/go-azure-sdk/sdk/client"
 	"github.com/hashicorp/go-azure-sdk/sdk/client/dataplane"
@@ -46,7 +46,6 @@ type StepCertificateInKeyVault struct {
 	client                 *AzureClient
 	set                    func(ctx context.Context, id secrets.SecretId) error
 	deleteSecret           func(ctx context.Context, secretURI, secretName string) error
-	getVaultURI            func(ctx context.Context, subscriptionID, resourceGroupName, keyVaultName string) (string, error)
 	waitForRolePropagation func(ctx context.Context, delay time.Duration) bool
 	say                    func(message string)
 	error                  func(e error)
@@ -68,9 +67,14 @@ func NewStepCertificateInKeyVault(client *AzureClient, ui packersdk.Ui, config *
 
 	step.set = step.setCertificate
 	step.deleteSecret = step.deleteCertificate
-	step.getVaultURI = step.getKeyVaultURI
 	step.waitForRolePropagation = waitForKeyVaultRBACRolePropagation
 	return step
+}
+
+func (s *StepCertificateInKeyVault) halt(state multistep.StateBag, err error) multistep.StepAction {
+	state.Put(constants.Error, err)
+	s.error(err)
+	return multistep.ActionHalt
 }
 
 func (s *StepCertificateInKeyVault) setCertificate(ctx context.Context, id secrets.SecretId) error {
@@ -96,26 +100,6 @@ func (s *StepCertificateInKeyVault) setCertificate(ctx context.Context, id secre
 	}
 
 	return nil
-}
-
-func (s *StepCertificateInKeyVault) getKeyVaultURI(ctx context.Context, subscriptionID, resourceGroupName, keyVaultName string) (string, error) {
-	if s.client == nil {
-		return "", fmt.Errorf("Azure client is not configured")
-	}
-
-	result, err := s.client.VaultsClient.Get(ctx, commonids.KeyVaultId{
-		SubscriptionId:    subscriptionID,
-		ResourceGroupName: resourceGroupName,
-		VaultName:         keyVaultName,
-	})
-	if err != nil {
-		return "", fmt.Errorf("getting Key Vault endpoint: %w", err)
-	}
-	if result.Model == nil || result.Model.Properties.VaultUri == nil || *result.Model.Properties.VaultUri == "" {
-		return "", fmt.Errorf("Azure did not return a Key Vault data-plane URI")
-	}
-
-	return *result.Model.Properties.VaultUri, nil
 }
 
 func (s *StepCertificateInKeyVault) deleteCertificate(ctx context.Context, keyVaultURI, secretName string) error {
@@ -213,40 +197,17 @@ func (s *StepCertificateInKeyVault) Run(ctx context.Context, state multistep.Sta
 	if s.config.BuildKeyVaultDeleteSecret && s.config.BuildKeyVaultName != "" {
 		isExistingKeyVault, ok := state.GetOk(constants.ArmIsExistingKeyVault)
 		if !ok || !isExistingKeyVault.(bool) {
-			s.error(fmt.Errorf("refusing to create Key Vault certificate secret because the configured build Key Vault is not marked as existing"))
-			return multistep.ActionHalt
+			return s.halt(state, fmt.Errorf("refusing to create Key Vault certificate secret because the configured build Key Vault is not marked as existing"))
 		}
 		if s.config.tmpKeyVaultSecretName == "" || keyVaultSecretName != s.config.tmpKeyVaultSecretName {
-			s.error(fmt.Errorf("refusing to create Key Vault secret %q because cleanup requires the generated run-scoped secret name", keyVaultSecretName))
-			return multistep.ActionHalt
+			return s.halt(state, fmt.Errorf("refusing to create Key Vault secret %q because cleanup requires the generated run-scoped secret name", keyVaultSecretName))
 		}
 
-		if endpoint, ok := state.GetOk(constants.ArmKeyVaultDataPlaneEndpoint); ok {
-			s.keyVaultEndpoint = endpoint.(string)
-		} else {
-			getVaultURI := s.getVaultURI
-			if getVaultURI == nil {
-				getVaultURI = s.getKeyVaultURI
-			}
-			lookupTimeout := 15 * time.Minute
-			if s.client != nil && s.client.PollingDuration > 0 {
-				lookupTimeout = s.client.PollingDuration
-			}
-			lookupContext, cancel := context.WithTimeout(ctx, lookupTimeout)
-			defer cancel()
-
-			vaultURI, err := getVaultURI(lookupContext, subscriptionId, resourceGroupName, keyVaultName)
-			if err != nil {
-				s.error(fmt.Errorf("failed to resolve the Key Vault data-plane URI before creating certificate secret %q: %s", keyVaultSecretName, err))
-				return multistep.ActionHalt
-			}
-			keyVaultEndpoint, err := keyVaultEndpointFromURI(vaultURI)
-			if err != nil {
-				s.error(fmt.Errorf("failed to validate the Key Vault data-plane URI before creating certificate secret %q: %s", keyVaultSecretName, err))
-				return multistep.ActionHalt
-			}
-			s.keyVaultEndpoint = keyVaultEndpoint
+		endpoint, ok := state.GetOk(constants.ArmKeyVaultDataPlaneEndpoint)
+		if !ok {
+			return s.halt(state, fmt.Errorf("the Key Vault data-plane endpoint is missing from the build state; the existing build Key Vault preflight must run before creating certificate secret %q", keyVaultSecretName))
 		}
+		s.keyVaultEndpoint = endpoint.(string)
 	}
 
 	s.secretWriteAttempted = true
@@ -325,7 +286,17 @@ func waitForKeyVaultRBACRolePropagation(ctx context.Context, delay time.Duration
 
 func isKeyVaultRBACRolePropagationError(err error) bool {
 	var deleteError *keyVaultSecretDeleteError
-	return errors.As(err, &deleteError) && deleteError.statusCode == http.StatusForbidden
+	if !errors.As(err, &deleteError) || deleteError.statusCode != http.StatusForbidden {
+		return false
+	}
+
+	// Key Vault also returns 403 for reasons no amount of RBAC propagation can
+	// fix, such as firewall (ForbiddenByConnection) or policy denials; retrying
+	// those only delays the real error.
+	message := strings.ToLower(deleteError.err.Error())
+	return !strings.Contains(message, "forbiddenbyconnection") &&
+		!strings.Contains(message, "forbiddenbyfirewall") &&
+		!strings.Contains(message, "forbiddenbypolicy")
 }
 
 func (s *StepCertificateInKeyVault) reportCleanupFailure(state multistep.StateBag, err error) {

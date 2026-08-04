@@ -23,6 +23,7 @@ type StepEnsureKeyVaultRBACRole struct {
 	config *Config
 	client *AzureClient
 	create func(ctx context.Context, id roleassignments.ScopedRoleAssignmentId, input roleassignments.RoleAssignmentCreateParameters) error
+	wait   func(ctx context.Context, delay time.Duration) bool
 	say    func(message string)
 	error  func(error)
 }
@@ -35,6 +36,7 @@ func NewStepEnsureKeyVaultRBACRole(client *AzureClient, ui packersdk.Ui, config 
 		error:  func(err error) { ui.Error(err.Error()) },
 	}
 	step.create = step.createRoleAssignment
+	step.wait = waitForKeyVaultRBACRolePropagation
 	return step
 }
 
@@ -67,6 +69,19 @@ func isRoleAssignmentAlreadyExists(result roleassignments.CreateOperationRespons
 	return strings.Contains(strings.ToLower(err.Error()), "roleassignmentexists")
 }
 
+// isRoleAssignmentPrincipalNotFound reports Azure's transient PrincipalNotFound
+// error, returned when a recently created identity has not yet replicated to
+// the directory serving the role assignment write.
+func isRoleAssignmentPrincipalNotFound(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "principalnotfound")
+}
+
+func (s *StepEnsureKeyVaultRBACRole) halt(state multistep.StateBag, err error) multistep.StepAction {
+	state.Put(constants.Error, err)
+	s.error(err)
+	return multistep.ActionHalt
+}
+
 func (s *StepEnsureKeyVaultRBACRole) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	if !s.config.shouldAssignBuildKeyVaultRBACRole() {
 		return multistep.ActionContinue
@@ -77,8 +92,7 @@ func (s *StepEnsureKeyVaultRBACRole) Run(ctx context.Context, state multistep.St
 	resourceGroupName := state.Get(constants.ArmResourceGroupName).(string)
 	principalID := s.config.buildKeyVaultRBACPrincipalID()
 	if principalID == "" {
-		s.error(fmt.Errorf("cannot grant Key Vault Secrets Officer because the Packer build identity object ID is unavailable"))
-		return multistep.ActionHalt
+		return s.halt(state, fmt.Errorf("cannot grant Key Vault Secrets Officer because the Packer build identity object ID is unavailable"))
 	}
 
 	keyVaultID := commonids.NewKeyVaultID(subscriptionID, resourceGroupName, keyVaultName).ID()
@@ -98,12 +112,26 @@ func (s *StepEnsureKeyVaultRBACRole) Run(ctx context.Context, state multistep.St
 	defer cancel()
 
 	s.say("Ensuring Key Vault Secrets Officer role assignment on the existing build Key Vault...")
-	if err := s.create(assignmentContext, roleAssignmentID, input); err != nil {
-		s.error(fmt.Errorf("failed to grant Key Vault Secrets Officer to the Packer build identity: %w. Set build_key_vault_assign_rbac_role=false only after granting Key Vault Secrets Officer, or equivalent secret data actions, at the vault scope or above; Packer also needs Microsoft.KeyVault/vaults/secrets/write to upload the certificate", err))
-		return multistep.ActionHalt
-	}
+	for attempt := 0; ; attempt++ {
+		err := s.create(assignmentContext, roleAssignmentID, input)
+		if err == nil {
+			return multistep.ActionContinue
+		}
+		if !isRoleAssignmentPrincipalNotFound(err) || attempt >= keyVaultRBACRolePropagationMaxRetries {
+			return s.halt(state, fmt.Errorf("failed to grant Key Vault Secrets Officer to the Packer build identity: %w. Set build_key_vault_assign_rbac_role=false only after granting that identity Key Vault Secrets Officer, or a role with the Microsoft.KeyVault/vaults/secrets/delete data action, at the build Key Vault scope; Packer also needs Microsoft.KeyVault/vaults/secrets/write to upload the certificate", err))
+		}
 
-	return multistep.ActionContinue
+		if attempt == 0 {
+			s.say("Waiting for the Packer build identity to become visible to Azure RBAC before retrying the role assignment...")
+		}
+		wait := s.wait
+		if wait == nil {
+			wait = waitForKeyVaultRBACRolePropagation
+		}
+		if !wait(assignmentContext, keyVaultRBACRolePropagationRetryInterval) {
+			return s.halt(state, fmt.Errorf("timed out waiting for the Packer build identity to become visible to Azure RBAC: %w", err))
+		}
+	}
 }
 
 func (s *StepEnsureKeyVaultRBACRole) Cleanup(multistep.StateBag) {}
