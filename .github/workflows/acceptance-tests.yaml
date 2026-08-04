@@ -113,8 +113,10 @@ jobs:
       - name: Export Key Vault fixture variables
         working-directory: ./terraform
         run: |
-          echo "ARM_KEY_VAULT_NAME=$(terraform output -raw key_vault_name)" >> $GITHUB_ENV
-          echo "ARM_RBAC_KEY_VAULT_NAME=$(terraform output -raw rbac_key_vault_name)" >> $GITHUB_ENV
+          ARM_KEY_VAULT_NAME="$(terraform output -raw key_vault_name)"
+          ARM_RBAC_KEY_VAULT_NAME="$(terraform output -raw rbac_key_vault_name)"
+          echo "ARM_KEY_VAULT_NAME=${ARM_KEY_VAULT_NAME}" >> $GITHUB_ENV
+          echo "ARM_RBAC_KEY_VAULT_NAME=${ARM_RBAC_KEY_VAULT_NAME}" >> $GITHUB_ENV
 
       - name: Run Acceptance Tests
         run:  make testacc
