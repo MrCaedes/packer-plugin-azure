@@ -163,14 +163,14 @@ func TestBuilderAcc_ManagedDisk_Windows(t *testing.T) {
 	})
 }
 
-func TestBuilderAcc_ManagedDisk_Windows_TemporaryKeyVault_RBACDefaultRole(t *testing.T) {
+func TestBuilderAcc_ManagedDisk_Windows_TemporaryKeyVault_RBAC(t *testing.T) {
 	t.Parallel()
 	common.CheckAcceptanceTestEnvVars(t, common.CheckAcceptanceTestEnvVarsParams{
 		CheckAzureCLI: true,
 	})
 
 	acctest.TestPlugin(t, &acctest.PluginTestCase{
-		Name:     "test-azure-managedisk-windows-temporary-key-vault-rbac-default-role",
+		Name:     "test-azure-managedisk-windows-temporary-key-vault-rbac",
 		Type:     "azure-arm",
 		Template: testBuilderAccManagedDiskWindowsTemporaryKeyVaultRBAC,
 		Check: func(buildCommand *exec.Cmd, logfile string) error {
@@ -213,7 +213,7 @@ func TestBuilderAcc_ManagedDisk_Windows_ExistingBuildKeyVault_RBACDefaultRole(t 
 	waitForNoActivePackerCertificateSecrets(t, keyVaultName)
 }
 
-func TestKeyVaultAcceptanceTemplatesUseDefaultRoleAssignment(t *testing.T) {
+func TestKeyVaultAcceptanceTemplatesOmitAssignRBACRole(t *testing.T) {
 	testCases := []struct {
 		name                 string
 		template             string
@@ -244,7 +244,7 @@ func TestKeyVaultAcceptanceTemplatesUseDefaultRoleAssignment(t *testing.T) {
 
 			builder := document.Builders[0]
 			if _, configured := builder["build_key_vault_assign_rbac_role"]; configured {
-				t.Fatal("Acceptance template must omit build_key_vault_assign_rbac_role to cover the default assignment behaviour")
+				t.Fatal("Acceptance template must omit build_key_vault_assign_rbac_role: the existing-vault test covers the default assignment, and the flag has no effect on Packer-created vaults")
 			}
 			if enabled, ok := builder["build_key_vault_enable_rbac_authorization"].(bool); !ok || !enabled {
 				t.Fatal("Acceptance template must enable Key Vault RBAC authorization")
@@ -276,7 +276,9 @@ func TestExistingBuildKeyVaultScope(t *testing.T) {
 func TestExistingBuildKeyVaultRoleAssignmentID(t *testing.T) {
 	scope := existingBuildKeyVaultScope("subscription-id", "key-vault-rg", "key-vault-name")
 	actual := existingBuildKeyVaultRoleAssignmentID(scope, "principal-id")
-	expected := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignments/%s", scope, keyVaultRoleAssignmentName(scope, "principal-id"))
+	// Pinned literal: regressions in the ID format or the deterministic GUID
+	// derivation must fail here, not deep inside a live acceptance run.
+	expected := "/subscriptions/subscription-id/resourceGroups/key-vault-rg/providers/Microsoft.KeyVault/vaults/key-vault-name/providers/Microsoft.Authorization/roleAssignments/9ac1c737-ee55-599f-84e9-2f55d1225ae9"
 	if actual != expected {
 		t.Fatalf("Expected deterministic Key Vault role assignment ID %q, got %q", expected, actual)
 	}
@@ -691,8 +693,9 @@ const testBuilderAccManagedDiskWindows = `
 }
 `
 
-// build_key_vault_assign_rbac_role is intentionally omitted so this test covers
-// the default Key Vault Secrets Officer assignment for a Packer-created vault.
+// A Packer-created RBAC vault deploys no data-plane role assignment: the
+// certificate secret is written by the same ARM deployment and the VM retrieves
+// it via enabledForDeployment, so a Contributor-only identity must succeed.
 const testBuilderAccManagedDiskWindowsTemporaryKeyVaultRBAC = `
 {
 	"variables": {

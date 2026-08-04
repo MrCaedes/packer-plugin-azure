@@ -64,3 +64,7 @@ insufficient. The Packer identity also needs
 and the usual permissions to create and delete the build resources. The test
 checks that no direct assignment exists before the build, verifies Packer's
 deterministic assignment afterwards, then removes only that assignment.
+
+The temporary-Key-Vault RBAC acceptance test needs no
+`Microsoft.Authorization/roleAssignments` permissions at all: a Packer-created
+RBAC vault deploys without any data-plane role assignment.

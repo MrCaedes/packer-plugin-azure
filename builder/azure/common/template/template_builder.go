@@ -21,7 +21,6 @@ const (
 
 	resourceKeyVaults             = "Microsoft.KeyVault/vaults"
 	resourceKeyVaultSecret        = "Microsoft.KeyVault/vaults/secrets"
-	resourceRoleAssignments       = "Microsoft.Authorization/roleAssignments"
 	resourceNetworkInterfaces     = "Microsoft.Network/networkInterfaces"
 	resourcePublicIPAddresses     = "Microsoft.Network/publicIPAddresses"
 	resourceVirtualMachine        = "Microsoft.Compute/virtualMachines"
@@ -29,8 +28,6 @@ const (
 	resourceNetworkSecurityGroups = "Microsoft.Network/networkSecurityGroups"
 
 	variableSshKeyPath = "sshKeyPath"
-
-	keyVaultSecretsOfficerRoleDefinitionID = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7"
 )
 
 type TemplateBuilder struct {
@@ -152,8 +149,12 @@ func (s *TemplateBuilder) SetSecretExpiry(exp int64) error {
 	return nil
 }
 
-// EnableKeyVaultRBACAuthorization configures Azure RBAC authorization for a Key Vault template.
-func (s *TemplateBuilder) EnableKeyVaultRBACAuthorization(assignRole bool) error {
+// EnableKeyVaultRBACAuthorization configures Azure RBAC authorization for a Key
+// Vault template. No data-plane role assignment is deployed: the certificate
+// secret is created by the same ARM deployment and the build VM retrieves it
+// through the vault's enabledForDeployment capability, so nothing in the build
+// uses the vault's data plane.
+func (s *TemplateBuilder) EnableKeyVaultRBACAuthorization() error {
 	resource, err := s.getResourceByType(resourceKeyVaults)
 	if err != nil {
 		return err
@@ -161,37 +162,7 @@ func (s *TemplateBuilder) EnableKeyVaultRBACAuthorization(assignRole bool) error
 
 	resource.Properties.AccessPolicies = nil
 	resource.Properties.EnableRbacAuthorization = common.BoolPtr(true)
-
-	if !assignRole {
-		delete(*s.template.Parameters, "objectId")
-		return nil
-	}
-
-	roleAssignmentName := fmt.Sprintf("[guid(resourceId('%s', parameters('keyVaultName')), parameters('objectId'), '%s')]", resourceKeyVaults, keyVaultSecretsOfficerRoleDefinitionID)
-	keyVaultResourceID := fmt.Sprintf("[resourceId('%s', parameters('keyVaultName'))]", resourceKeyVaults)
-	roleAssignmentResourceID := fmt.Sprintf("[extensionResourceId(resourceId('%s', parameters('keyVaultName')), '%s', guid(resourceId('%s', parameters('keyVaultName')), parameters('objectId'), '%s'))]", resourceKeyVaults, resourceRoleAssignments, resourceKeyVaults, keyVaultSecretsOfficerRoleDefinitionID)
-
-	roleAssignment := &Resource{
-		ApiVersion: common.StringPtr("2022-04-01"),
-		Name:       common.StringPtr(roleAssignmentName),
-		Type:       common.StringPtr(resourceRoleAssignments),
-		Scope:      common.StringPtr(keyVaultResourceID),
-		DependsOn:  &[]string{keyVaultResourceID},
-		Properties: &Properties{
-			PrincipalId:      common.StringPtr("[parameters('objectId')]"),
-			RoleDefinitionId: common.StringPtr(fmt.Sprintf("[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '%s')]", keyVaultSecretsOfficerRoleDefinitionID)),
-		},
-	}
-	if err := s.addResource(roleAssignment); err != nil {
-		return err
-	}
-
-	secret, err := s.getResourceByType(resourceKeyVaultSecret)
-	if err != nil {
-		return err
-	}
-	s.addResourceDependency(secret, roleAssignmentResourceID)
-
+	delete(*s.template.Parameters, "objectId")
 	return nil
 }
 
